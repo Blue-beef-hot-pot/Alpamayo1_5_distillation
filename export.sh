@@ -1,8 +1,5 @@
 source /APP/u22/ai_x86/toolshs/setproxy.sh 172.16.31.200 3138
 
-export UV_CACHE_DIR=/media/DISK4TB/personal/winterwang/.cache/uv
-export HF_HOME="/media/DISK4TB/personal/winterwang/.cache/hf"
-
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_TOKEN="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"
 
