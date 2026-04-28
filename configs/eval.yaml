@@ -1,0 +1,19 @@
+# Alpamayo 1.5 Distillation Evaluation Configuration
+
+model:
+  checkpoint_path: "outputs/distilled/final"
+  dtype: bfloat16
+  num_traj_samples: 16
+  top_p: 0.98
+  temperature: 0.6
+  max_generation_length: 256
+
+data:
+  dataset: "nvidia/PhysicalAI-Autonomous-Vehicles"
+  num_clips: 50  # number of test clips, null = all
+  num_workers: 4
+
+metrics:
+  - minADE
+  - minFDE
+  - miss_rate  # percentage of trajectories with minFDE > 2.0m
