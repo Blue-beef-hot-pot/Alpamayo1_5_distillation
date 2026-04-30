@@ -19,7 +19,6 @@ import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-# Ensure the src directory is on the path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpamayo1_5 import helper
@@ -27,6 +26,7 @@ from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 from alpamayo1_5_distill.config import Alpamayo1_5_DistilledConfig
 from alpamayo1_5_distill.distill_loss import DistillationLoss
 from alpamayo1_5_distill.model import Alpamayo1_5_Distilled
+from alpamayo1_5_distill.student_forward import student_forward
 from alpamayo1_5_distill.teacher import load_teacher, teacher_forward
 
 logger = logging.getLogger(__name__)
@@ -61,15 +61,41 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
 
 
 def build_dataloader(cfg: DictConfig):
-    """Build a simple dataloader that yields clip data.
+    """Yield clip data dicts for training.
 
-    In a full implementation, this would iterate over all clips in the dataset.
-    For now, it yields a single example clip for development/testing.
+    When ``data.clip_ids`` is a list, iterate over each clip.  Otherwise fall
+    back to a single example clip for development / testing.
     """
-    clip_id = "030c760c-ae38-49aa-9ad8-f5650a545d26"
-    logger.info(f"Loading data for clip_id: {clip_id}")
-    data = load_physical_aiavdataset(clip_id, t0_us=5_100_000)
-    yield data
+    clip_ids = cfg.data.get("clip_ids")
+    if not clip_ids:
+        clip_ids = ["030c760c-ae38-49aa-9ad8-f5650a545d26"]
+
+    for clip_id in clip_ids:
+        logger.info("Loading clip: %s", clip_id)
+        data = load_physical_aiavdataset(clip_id, t0_us=5_100_000)
+        yield data
+
+
+def prepare_model_inputs(data: dict, processor, device: str) -> dict:
+    """Tokenize image/text inputs and build the model_inputs dict."""
+    messages = helper.create_message(
+        frames=data["image_frames"].flatten(0, 1),
+        camera_indices=data["camera_indices"],
+    )
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    model_inputs = {
+        "tokenized_data": inputs,
+        "ego_history_xyz": data["ego_history_xyz"],
+        "ego_history_rot": data["ego_history_rot"],
+    }
+    return helper.to_device(model_inputs, device)
 
 
 @hydra.main(config_path="../configs", config_name="distill", version_base="1.3")
@@ -80,8 +106,9 @@ def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.training.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Load teacher
     device = "cuda"
+
+    # 1) Load teacher
     teacher = load_teacher(
         model_name=cfg.teacher.model_name,
         device=device,
@@ -102,46 +129,52 @@ def main(cfg: DictConfig) -> None:
 
     processor = helper.get_processor(student.tokenizer)
 
-    # 3) Build loss, optimizer, scheduler
+    # 3) Build loss (with hidden projection for cross-dimension Expert KD)
+    teacher_hidden_dim = teacher.vlm.config.text_config.hidden_size
+    student_hidden_dim = student.vlm.config.text_config.hidden_size
     distill_loss = DistillationLoss(
         vlm_logits_weight=cfg.loss.vlm_logits_weight,
         expert_hidden_weight=cfg.loss.expert_hidden_weight,
         trajectory_l2_weight=cfg.loss.trajectory_l2_weight,
         temperature=cfg.loss.temperature,
+        teacher_hidden_dim=teacher_hidden_dim,
+        student_hidden_dim=student_hidden_dim,
+    ).to(device)
+
+    # 4) Build optimizer — include distill_loss parameters (hidden_proj)
+    all_params = list(student.parameters()) + list(distill_loss.parameters())
+    optimizer = hydra.utils.instantiate(cfg.optimizer, params=all_params)
+
+    # Estimate total optimizer steps for LR scheduler
+    # Use a single pass to count batches, then compute T_max
+    num_batches_per_epoch = sum(1 for _ in build_dataloader(cfg))
+    total_optimizer_steps = (
+        num_batches_per_epoch * cfg.training.num_epochs
+    ) // cfg.training.gradient_accumulation_steps
+    logger.info(
+        "Batches/epoch: %d, total optimizer steps: %d",
+        num_batches_per_epoch,
+        total_optimizer_steps,
     )
 
-    optimizer = hydra.utils.instantiate(cfg.optimizer, params=student.parameters())
-    scheduler = hydra.utils.instantiate(cfg.lr_scheduler, optimizer=optimizer)
+    # Build scheduler with correct T_max (total optimizer steps, not epochs)
+    scheduler_cfg = OmegaConf.to_container(cfg.lr_scheduler, resolve=True)
+    scheduler_cfg["T_max"] = total_optimizer_steps
+    scheduler = hydra.utils.instantiate(scheduler_cfg, optimizer=optimizer)
 
-    # 4) Training loop
+    # 5) Training loop
     global_step = 0
     best_loss = float("inf")
+    optimizer.zero_grad()
 
     for epoch in range(cfg.training.num_epochs):
         student.train()
+        distill_loss.train()
         epoch_loss = 0.0
         num_batches = 0
 
         for batch_idx, data in enumerate(build_dataloader(cfg)):
-            # Prepare inputs
-            messages = helper.create_message(
-                frames=data["image_frames"].flatten(0, 1),
-                camera_indices=data["camera_indices"],
-            )
-            inputs = processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=False,
-                continue_final_message=True,
-                return_dict=True,
-                return_tensors="pt",
-            )
-            model_inputs = {
-                "tokenized_data": inputs,
-                "ego_history_xyz": data["ego_history_xyz"],
-                "ego_history_rot": data["ego_history_rot"],
-            }
-            model_inputs = helper.to_device(model_inputs, device)
+            model_inputs = prepare_model_inputs(data, processor, device)
 
             # Teacher forward (no grad)
             with torch.no_grad():
@@ -155,21 +188,28 @@ def main(cfg: DictConfig) -> None:
                     collect_expert_hiddens=cfg.teacher.collect_expert_hiddens,
                 )
 
-            # Student forward (with grad)
-            # TODO: implement student_forward_with_hiddens analogous to teacher_forward
-            # For now, compute trajectory loss only
+            # Free teacher activations (keep only detached soft labels)
+            del data
+            torch.cuda.empty_cache()
+
+            # Student forward with teacher-forcing (differentiable VLM)
             with torch.autocast("cuda", dtype=getattr(torch, cfg.training.mixed_precision)):
-                student_pred_xyz, student_pred_rot = student.sample_trajectories_from_data_with_vlm_rollout(
-                    data=model_inputs,
-                    top_p=cfg.teacher.top_p,
-                    temperature=cfg.teacher.temperature,
+                student_out = student_forward(
+                    student,
+                    model_inputs,
+                    teacher_sequences=teacher_out.sequences,
                     num_traj_samples=cfg.teacher.num_traj_samples,
-                    max_generation_length=cfg.teacher.max_generation_length,
+                    collect_vlm_logits=cfg.loss.vlm_logits_weight > 0,
+                    collect_expert_hiddens=cfg.loss.expert_hidden_weight > 0,
                 )
 
                 losses = distill_loss(
-                    student_traj=student_pred_xyz,
-                    teacher_traj=teacher_out.pred_xyz,
+                    student_vlm_logits=student_out.vlm_logits,
+                    teacher_vlm_logits=teacher_out.vlm_logits,
+                    student_expert_hiddens=student_out.expert_hiddens,
+                    teacher_expert_hiddens=teacher_out.expert_hiddens,
+                    student_traj=student_out.sampled_traj,
+                    teacher_traj=teacher_out.sampled_traj,
                 )
 
             loss = losses["total"]
@@ -179,7 +219,7 @@ def main(cfg: DictConfig) -> None:
             if (global_step + 1) % cfg.training.gradient_accumulation_steps == 0:
                 if cfg.training.max_grad_norm:
                     torch.nn.utils.clip_grad_norm_(
-                        student.parameters(), cfg.training.max_grad_norm
+                        all_params, cfg.training.max_grad_norm
                     )
                 optimizer.step()
                 scheduler.step()

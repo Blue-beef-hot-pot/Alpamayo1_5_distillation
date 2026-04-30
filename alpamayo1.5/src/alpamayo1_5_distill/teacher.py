@@ -31,6 +31,7 @@ class TeacherOutput:
         sampled_traj: Sampled action trajectories, shape [B, n_sets, n_samples, T, 2].
         pred_xyz: Predicted xyz trajectories, shape [B, n_sets, n_samples, T, 3].
         pred_rot: Predicted rotation matrices, shape [B, n_sets, n_samples, T, 3, 3].
+        sequences: Generated token IDs from teacher VLM, used for student teacher-forcing.
         cot: Chain-of-causation reasoning text per sample.
         num_expert_layers: Number of layers in the teacher Expert.
     """
@@ -42,6 +43,7 @@ class TeacherOutput:
         sampled_traj: torch.Tensor | None = None,
         pred_xyz: torch.Tensor | None = None,
         pred_rot: torch.Tensor | None = None,
+        sequences: torch.Tensor | None = None,
         cot: list[str] | None = None,
         num_expert_layers: int | None = None,
     ) -> None:
@@ -50,11 +52,11 @@ class TeacherOutput:
         self.sampled_traj = sampled_traj
         self.pred_xyz = pred_xyz
         self.pred_rot = pred_rot
+        self.sequences = sequences
         self.cot = cot
         self.num_expert_layers = num_expert_layers
 
 
-@torch.no_grad()
 def load_teacher(
     model_name: str = "nvidia/Alpamayo-1.5-10B",
     device: str = "cuda",
@@ -327,6 +329,7 @@ def teacher_forward(
         sampled_traj=sampled_action,
         pred_xyz=pred_xyz,
         pred_rot=pred_rot,
+        sequences=vlm_outputs.sequences,
         cot=cot,
         num_expert_layers=num_expert_layers,
     )
