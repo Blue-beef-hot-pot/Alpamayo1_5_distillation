@@ -129,19 +129,20 @@ def main(cfg: DictConfig) -> None:
 
     processor = helper.get_processor(student.tokenizer)
 
-    # 3) Build loss (with hidden projection for cross-dimension Expert KD)
+    # 3) Build loss (with grouped projections + margin ReLU for Expert & VLM KD)
     teacher_hidden_dim = teacher.vlm.config.text_config.hidden_size
     student_hidden_dim = student.vlm.config.text_config.hidden_size
     distill_loss = DistillationLoss(
         vlm_logits_weight=cfg.loss.vlm_logits_weight,
         expert_hidden_weight=cfg.loss.expert_hidden_weight,
+        vlm_hidden_weight=cfg.loss.vlm_hidden_weight,
         trajectory_l2_weight=cfg.loss.trajectory_l2_weight,
         temperature=cfg.loss.temperature,
         teacher_hidden_dim=teacher_hidden_dim,
         student_hidden_dim=student_hidden_dim,
     ).to(device)
 
-    # 4) Build optimizer — include distill_loss parameters (hidden_proj)
+    # 4) Build optimizer — include distill_loss parameters (grouped projections + margins)
     all_params = list(student.parameters()) + list(distill_loss.parameters())
     optimizer = hydra.utils.instantiate(cfg.optimizer, params=all_params)
 
@@ -186,6 +187,7 @@ def main(cfg: DictConfig) -> None:
                     num_traj_samples=cfg.teacher.num_traj_samples,
                     max_generation_length=cfg.teacher.max_generation_length,
                     collect_expert_hiddens=cfg.teacher.collect_expert_hiddens,
+                    collect_vlm_hiddens=cfg.loss.vlm_hidden_weight > 0,
                 )
 
             # Free teacher activations (keep only detached soft labels)
@@ -201,13 +203,16 @@ def main(cfg: DictConfig) -> None:
                     num_traj_samples=cfg.teacher.num_traj_samples,
                     collect_vlm_logits=cfg.loss.vlm_logits_weight > 0,
                     collect_expert_hiddens=cfg.loss.expert_hidden_weight > 0,
+                    collect_vlm_hiddens=cfg.loss.vlm_hidden_weight > 0,
                 )
 
                 losses = distill_loss(
                     student_vlm_logits=student_out.vlm_logits,
                     teacher_vlm_logits=teacher_out.vlm_logits,
-                    student_expert_hiddens=student_out.expert_hiddens,
-                    teacher_expert_hiddens=teacher_out.expert_hiddens,
+                    student_expert_hiddens=student_out.expert_hiddens_all_steps,
+                    teacher_expert_hiddens=teacher_out.expert_hiddens_all_steps,
+                    student_vlm_hiddens=student_out.vlm_hiddens,
+                    teacher_vlm_hiddens=teacher_out.vlm_hiddens,
                     student_traj=student_out.sampled_traj,
                     teacher_traj=teacher_out.sampled_traj,
                 )

@@ -17,6 +17,7 @@ student:
 loss:
   vlm_logits_weight: 1.0
   expert_hidden_weight: 0.5
+  vlm_hidden_weight: 0.5
   trajectory_l2_weight: 1.0
   temperature: 2.0
 

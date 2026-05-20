@@ -58,8 +58,9 @@ pytest
 
 ### Distillation losses
 1. **VLM Logits KD** — KL divergence between teacher/student VLM output distributions
-2. **Expert Hidden KD** — MSE between teacher/student Expert per-layer hidden states (layer mapping: 36→24 via uniform sampling)
-3. **Trajectory L2** — MSE between predicted trajectories
+2. **Expert Hidden KD** — MSE between teacher/student Expert hidden states across all diffusion steps (layer mapping: 36→24 via uniform sampling; step mapping: 10→4 via uniform sampling). Uses grouped learnable projections (3 groups: shallow/mid/deep) with margin ReLU (Heo et al., ICCV 2019) to suppress weak teacher activations.
+3. **VLM Hidden KD** — MSE between teacher/student VLM per-layer hidden states. Same grouped projection + margin ReLU scheme as Expert Hidden KD.
+4. **Trajectory L2** — MSE between predicted trajectories
 
 ## Key Files
 
@@ -73,8 +74,8 @@ pytest
 **Student (distillation package):**
 - `src/alpamayo1_5_distill/config.py` — Alpamayo1_5_DistilledConfig (2B defaults, 4-step FM)
 - `src/alpamayo1_5_distill/model.py` — Alpamayo1_5_Distilled (subclass, AutoModel registered)
-- `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with hidden state extraction
-- `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM KD + Expert hidden KD + Traj L2)
+- `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with VLM hidden states + Expert hidden states across all diffusion steps
+- `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU
 
 **Configs:**
 - `configs/distill.yaml` — Training config (teacher, student, loss weights, optimizer, scheduler)

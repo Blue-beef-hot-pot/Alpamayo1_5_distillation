@@ -11,10 +11,13 @@ and adds a student model plus teacher/student distillation utilities under
   spaces, diffusion, geometry, and data loading.
 - A distilled student model that reuses the original inference pipeline while
   replacing the VLM backbone with `Qwen/Qwen3-VL-2B-Instruct`.
-- Teacher wrappers that run `nvidia/Alpamayo-1.5-10B` and collect soft labels.
+- Teacher wrappers that run `nvidia/Alpamayo-1.5-10B` and collect soft labels
+  (VLM logits, VLM hidden states, Expert hidden states across all diffusion
+  steps, and sampled action trajectories).
 - Student teacher-forcing forward logic for differentiable VLM distillation.
-- Distillation losses for VLM logits, Expert hidden states, and action
-  trajectories.
+- Distillation losses: VLM Logits KD, Expert Hidden KD (full diffusion
+  trajectory), VLM Hidden KD, and Trajectory L2 — all with grouped learnable
+  projections and margin ReLU.
 - Hydra configs and scripts for training, teacher-data generation, and
   evaluation.
 
@@ -62,13 +65,19 @@ Training uses an online teacher-student path:
 2. Load the student model from `Alpamayo1_5_DistilledConfig`.
 3. Build image/text inputs and fuse trajectory history tokens.
 4. Run the teacher autoregressively to collect generated sequences, VLM logits,
-   Expert hidden states, and sampled action trajectories.
+   VLM hidden states, Expert hidden states across all diffusion steps, and
+   sampled action trajectories.
 5. Feed the teacher-generated token sequences through the student VLM with
-   gradients enabled.
-6. Run the student Expert diffusion denoising path using the resulting KV cache.
+   gradients enabled (teacher-forcing), collecting VLM hidden states.
+6. Run the student Expert diffusion denoising path using the resulting KV cache,
+   collecting Expert hidden states at every diffusion step.
 7. Optimize the weighted sum of:
    - VLM logits KL distillation
-   - Expert hidden-state MSE, with layer mapping and optional hidden projection
+   - Expert hidden-state MSE across all diffusion steps, with layer mapping
+     (36→24) and step mapping (10→4), grouped learnable projections and
+     margin ReLU
+   - VLM hidden-state MSE, with layer mapping and grouped projections + margin
+     ReLU
    - sampled action trajectory L2 loss
 
 ## Setup
@@ -141,13 +150,15 @@ metrics as a smoke/prototype signal until dataset iteration is implemented.
 
 - VLM logits KD is skipped when teacher and student vocab dimensions differ.
   This should be made explicit before long training runs.
-- The hidden projection inside `DistillationLoss` is trainable but is not saved
-  by `student.save_pretrained()`. Checkpointing should include this module plus
-  optimizer and scheduler state.
+- The grouped projections and margin parameters inside `DistillationLoss` are
+  trainable but are not saved by `student.save_pretrained()`. Checkpointing
+  should include this module plus optimizer and scheduler state.
 - Gradient accumulation currently needs careful handling when the final partial
   accumulation window is not full.
 - `data.clip_ids: null` currently falls back to a single development clip, not
   the full dataset.
+- Teacher VLM hidden states require a separate forward pass (`use_cache=False`)
+  after generation, which increases peak GPU memory.
 
 ## License
 

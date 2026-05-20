@@ -31,7 +31,8 @@ class StudentOutput:
     def __init__(
         self,
         vlm_logits: torch.Tensor | None = None,
-        expert_hiddens: list[torch.Tensor] | None = None,
+        vlm_hiddens: list[torch.Tensor] | None = None,
+        expert_hiddens_all_steps: list[list[torch.Tensor]] | None = None,
         sampled_traj: torch.Tensor | None = None,
         pred_xyz: torch.Tensor | None = None,
         pred_rot: torch.Tensor | None = None,
@@ -39,7 +40,8 @@ class StudentOutput:
         num_expert_layers: int | None = None,
     ) -> None:
         self.vlm_logits = vlm_logits
-        self.expert_hiddens = expert_hiddens or []
+        self.vlm_hiddens = vlm_hiddens or []
+        self.expert_hiddens_all_steps = expert_hiddens_all_steps or []
         self.sampled_traj = sampled_traj
         self.pred_xyz = pred_xyz
         self.pred_rot = pred_rot
@@ -57,14 +59,15 @@ def student_forward(
     max_generation_length: int = 256,
     collect_vlm_logits: bool = True,
     collect_expert_hiddens: bool = True,
+    collect_vlm_hiddens: bool = True,
 ) -> StudentOutput:
     """Run student forward pass and extract all distillation signals.
 
     When ``teacher_sequences`` is provided the VLM runs in **teacher-forcing**
     mode: the teacher-generated token IDs are passed through
-    ``student.vlm.forward()`` with gradient, making VLM Logits KD
-    differentiable.  Otherwise the student falls back to ``generate()``
-    (no gradient through VLM).
+    ``student.vlm.forward()`` with gradient, making VLM Logits KD and
+    VLM Hidden KD differentiable.  Otherwise the student falls back to
+    ``generate()`` (no gradient through VLM).
 
     Args:
         student: The student model (Alpamayo1_5_Distilled).
@@ -78,6 +81,7 @@ def student_forward(
         max_generation_length: Max VLM generation tokens (inference mode only).
         collect_vlm_logits: Whether to collect VLM logits.
         collect_expert_hiddens: Whether to collect Expert hidden states.
+        collect_vlm_hiddens: Whether to collect VLM hidden states.
 
     Returns:
         StudentOutput with all intermediate representations.
@@ -112,6 +116,8 @@ def student_forward(
     pad_token_id = student.tokenizer.pad_token_id
 
     # ── VLM forward ─────────────────────────────────────────────────
+    student_vlm_hiddens: list[torch.Tensor] = []
+
     if teacher_sequences is not None:
         # Teacher-forcing mode: differentiable VLM forward
         sequences = teacher_sequences.to(device)
@@ -128,11 +134,12 @@ def student_forward(
                     val = val.repeat_interleave(num_traj_samples, dim=0)
                 visual_kwargs[key] = val
 
-        # Forward with gradient — VLM Logits KD can backprop through this
+        # Forward with gradient — VLM Logits KD and VLM Hidden KD can backprop
         vlm_out = student.vlm(
             input_ids=sequences,
             attention_mask=full_attention_mask,
             use_cache=True,
+            output_hidden_states=collect_vlm_hiddens,
             **visual_kwargs,
         )
 
@@ -142,6 +149,11 @@ def student_forward(
             vlm_logits = vlm_out.logits[:, prompt_len - 1 : prompt_len - 1 + gen_len, :]
         else:
             vlm_logits = None
+
+        # Collect VLM hidden states (exclude embedding layer output)
+        student_vlm_hiddens: list[torch.Tensor] = []
+        if collect_vlm_hiddens and vlm_out.hidden_states is not None:
+            student_vlm_hiddens = list(vlm_out.hidden_states[1:])
 
         prompt_cache = vlm_out.past_key_values
         rope_deltas = student.vlm.model.rope_deltas
@@ -283,17 +295,15 @@ def student_forward(
     pred_xyz = einops.rearrange(pred_xyz, "(b n) ... -> b 1 n ...", n=num_traj_samples)
     pred_rot = einops.rearrange(pred_rot, "(b n) ... -> b 1 n ...", n=num_traj_samples)
 
-    # Aggregate Expert hidden states (last diffusion step)
-    expert_hiddens: list[torch.Tensor] = []
+    # Keep Expert hidden states from all diffusion steps
     num_expert_layers = None
     if all_expert_hiddens:
-        last_step_hiddens = all_expert_hiddens[-1]
-        expert_hiddens = last_step_hiddens
-        num_expert_layers = len(last_step_hiddens)
+        num_expert_layers = len(all_expert_hiddens[-1])
 
     return StudentOutput(
         vlm_logits=vlm_logits,
-        expert_hiddens=expert_hiddens,
+        vlm_hiddens=student_vlm_hiddens,
+        expert_hiddens_all_steps=all_expert_hiddens,
         sampled_traj=sampled_action,
         pred_xyz=pred_xyz,
         pred_rot=pred_rot,

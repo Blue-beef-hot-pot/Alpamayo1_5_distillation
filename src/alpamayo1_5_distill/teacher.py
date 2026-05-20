@@ -5,7 +5,8 @@
 
 Provides utilities to load the original Alpamayo 1.5 (8B) model and run
 forward passes that extract intermediate representations (VLM logits,
-Expert hidden states, sampled trajectories) as soft labels for distillation.
+VLM hidden states, Expert hidden states across all diffusion steps,
+sampled trajectories) as soft labels for distillation.
 """
 
 import copy
@@ -27,7 +28,10 @@ class TeacherOutput:
 
     Attributes:
         vlm_logits: Logits from the VLM generation step, shape depends on generation.
-        expert_hiddens: List of per-layer Expert hidden states, each [B*, T, hidden].
+        vlm_hiddens: Per-layer VLM hidden states, each [B*, T, hidden].
+        expert_hiddens_all_steps: Per-step per-layer Expert hidden states,
+            outer list = diffusion steps, inner list = layers,
+            each [B*, T, hidden].
         sampled_traj: Sampled action trajectories, shape [B, n_sets, n_samples, T, 2].
         pred_xyz: Predicted xyz trajectories, shape [B, n_sets, n_samples, T, 3].
         pred_rot: Predicted rotation matrices, shape [B, n_sets, n_samples, T, 3, 3].
@@ -39,7 +43,8 @@ class TeacherOutput:
     def __init__(
         self,
         vlm_logits: torch.Tensor | None = None,
-        expert_hiddens: list[torch.Tensor] | None = None,
+        vlm_hiddens: list[torch.Tensor] | None = None,
+        expert_hiddens_all_steps: list[list[torch.Tensor]] | None = None,
         sampled_traj: torch.Tensor | None = None,
         pred_xyz: torch.Tensor | None = None,
         pred_rot: torch.Tensor | None = None,
@@ -48,7 +53,8 @@ class TeacherOutput:
         num_expert_layers: int | None = None,
     ) -> None:
         self.vlm_logits = vlm_logits
-        self.expert_hiddens = expert_hiddens or []
+        self.vlm_hiddens = vlm_hiddens or []
+        self.expert_hiddens_all_steps = expert_hiddens_all_steps or []
         self.sampled_traj = sampled_traj
         self.pred_xyz = pred_xyz
         self.pred_rot = pred_rot
@@ -138,11 +144,13 @@ def teacher_forward(
     num_traj_samples: int = 6,
     max_generation_length: int = 256,
     collect_expert_hiddens: bool = True,
+    collect_vlm_hiddens: bool = True,
 ) -> TeacherOutput:
     """Run teacher forward pass and extract soft labels for distillation.
 
     This mirrors ``sample_trajectories_from_data_with_vlm_rollout`` but
-    additionally extracts VLM logits and Expert per-layer hidden states.
+    additionally extracts VLM logits, VLM hidden states, and Expert hidden
+    states across all diffusion steps.
 
     Args:
         teacher: The loaded teacher model (Alpamayo1_5).
@@ -153,6 +161,8 @@ def teacher_forward(
         max_generation_length: Max VLM generation tokens.
         collect_expert_hiddens: Whether to collect Expert hidden states
             (memory-intensive, disable for inference-only).
+        collect_vlm_hiddens: Whether to collect VLM hidden states via
+            an extra forward pass (memory-intensive).
 
     Returns:
         TeacherOutput with all intermediate representations.
@@ -223,6 +233,34 @@ def teacher_forward(
         eos_token_id=eos_token_id,
         pad_token_id=teacher.tokenizer.pad_token_id,
     )
+
+    # 1b) Collect VLM hidden states via a separate forward pass
+    teacher_vlm_hiddens: list[torch.Tensor] = []
+    if collect_vlm_hiddens:
+        sequences = vlm_outputs.sequences
+        b_star_vlm = sequences.shape[0]
+        seq_attention_mask = (sequences != teacher.tokenizer.pad_token_id).long()
+
+        # Repeat visual inputs for num_traj_samples
+        visual_kwargs: dict[str, Any] = {}
+        for key in ("pixel_values", "image_grid_thw", "image_grid_thw_batch"):
+            if key in tokenized_data:
+                val = tokenized_data[key]
+                if isinstance(val, torch.Tensor) and val.shape[0] == B:
+                    val = val.repeat_interleave(num_traj_samples, dim=0)
+                visual_kwargs[key] = val
+
+        vlm_fwd_out = teacher.vlm(
+            input_ids=sequences,
+            attention_mask=seq_attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+            **visual_kwargs,
+        )
+        # Exclude embedding layer output (index 0)
+        teacher_vlm_hiddens = list(vlm_fwd_out.hidden_states[1:])
+        del vlm_fwd_out
+        torch.cuda.empty_cache()
 
     prompt_cache = vlm_outputs.past_key_values
     prefill_seq_len = prompt_cache.get_seq_length()
@@ -313,19 +351,16 @@ def teacher_forward(
         import numpy as np
         cot = np.array(extra["cot"]).reshape([B, num_traj_samples]).tolist()
 
-    # 6) Aggregate Expert hidden states across diffusion steps
+    # 6) Keep Expert hidden states from all diffusion steps
     # all_expert_hiddens: [n_diff_steps][n_layers][B*, T, hidden]
-    # Take the last diffusion step's hiddens as representative
-    expert_hiddens = []
     num_expert_layers = None
     if all_expert_hiddens:
-        last_step_hiddens = all_expert_hiddens[-1]
-        expert_hiddens = last_step_hiddens
-        num_expert_layers = len(last_step_hiddens)
+        num_expert_layers = len(all_expert_hiddens[-1])
 
     return TeacherOutput(
         vlm_logits=vlm_logits,
-        expert_hiddens=expert_hiddens,
+        vlm_hiddens=teacher_vlm_hiddens,
+        expert_hiddens_all_steps=all_expert_hiddens,
         sampled_traj=sampled_action,
         pred_xyz=pred_xyz,
         pred_rot=pred_rot,
