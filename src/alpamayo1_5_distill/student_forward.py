@@ -13,7 +13,6 @@ Supports two modes:
 Both modes share the Expert denoising step (always with gradient).
 """
 
-import copy
 import logging
 from typing import Any
 
@@ -21,6 +20,7 @@ import einops
 import torch
 
 from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
+from alpamayo1_5_distill.train_utils import repeat_visual_inputs, shallow_copy_data
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def student_forward(
 
     from alpamayo1_5.models.alpamayo1_5 import ExpertLogitsProcessor
 
-    data = copy.deepcopy(data)
+    data = shallow_copy_data(data)
     ego_history_xyz = data["ego_history_xyz"]
     ego_history_rot = data["ego_history_rot"]
     B = ego_history_xyz.shape[0]
@@ -125,14 +125,7 @@ def student_forward(
 
         full_attention_mask = (sequences != pad_token_id).long()
 
-        # Repeat visual inputs for num_return_sequences
-        visual_kwargs: dict[str, Any] = {}
-        for key in ("pixel_values", "image_grid_thw", "image_grid_thw_batch"):
-            if key in tokenized_data:
-                val = tokenized_data[key]
-                if isinstance(val, torch.Tensor) and val.shape[0] == B:
-                    val = val.repeat_interleave(num_traj_samples, dim=0)
-                visual_kwargs[key] = val
+        visual_kwargs = repeat_visual_inputs(tokenized_data, B, num_traj_samples)
 
         # Forward with gradient — VLM Logits KD and VLM Hidden KD can backprop
         vlm_out = student.vlm(

@@ -9,7 +9,6 @@ VLM hidden states, Expert hidden states across all diffusion steps,
 sampled trajectories) as soft labels for distillation.
 """
 
-import copy
 import logging
 from typing import Any
 
@@ -19,6 +18,7 @@ from transformers import AutoConfig
 
 from alpamayo1_5 import helper
 from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
+from alpamayo1_5_distill.train_utils import repeat_visual_inputs, shallow_copy_data
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ def teacher_forward(
 
     from alpamayo1_5.models.alpamayo1_5 import ExpertLogitsProcessor
 
-    data = copy.deepcopy(data)
+    data = shallow_copy_data(data)
     ego_history_xyz = data["ego_history_xyz"]
     ego_history_rot = data["ego_history_rot"]
     B = ego_history_xyz.shape[0]
@@ -241,14 +241,7 @@ def teacher_forward(
         b_star_vlm = sequences.shape[0]
         seq_attention_mask = (sequences != teacher.tokenizer.pad_token_id).long()
 
-        # Repeat visual inputs for num_traj_samples
-        visual_kwargs: dict[str, Any] = {}
-        for key in ("pixel_values", "image_grid_thw", "image_grid_thw_batch"):
-            if key in tokenized_data:
-                val = tokenized_data[key]
-                if isinstance(val, torch.Tensor) and val.shape[0] == B:
-                    val = val.repeat_interleave(num_traj_samples, dim=0)
-                visual_kwargs[key] = val
+        visual_kwargs = repeat_visual_inputs(tokenized_data, B, num_traj_samples)
 
         vlm_fwd_out = teacher.vlm(
             input_ids=sequences,

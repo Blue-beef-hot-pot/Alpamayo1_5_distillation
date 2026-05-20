@@ -1,0 +1,60 @@
+# Alpamayo 1.5 Pipeline-Parallel Distillation Training Configuration
+#
+# Usage: torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
+
+defaults:
+  - override hydra/job_chdir: false
+
+teacher:
+  model_name: "nvidia/Alpamayo-1.5-10B"
+  hidden_dim: 4096  # Qwen3-VL-8B text_config.hidden_size
+  dtype: bfloat16
+  top_p: 0.98
+  temperature: 0.6
+  num_traj_samples: 6
+  max_generation_length: 256
+  collect_expert_hiddens: true
+
+student:
+  vlm_name_or_path: "Qwen/Qwen3-VL-2B-Instruct"
+  attn_implementation: flash_attention_2
+  dtype: bfloat16
+
+loss:
+  vlm_logits_weight: 1.0
+  expert_hidden_weight: 0.5
+  vlm_hidden_weight: 0.5
+  trajectory_l2_weight: 1.0
+  temperature: 2.0
+
+training:
+  batch_size: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  num_epochs: 10
+  gradient_accumulation_steps: 4
+  mixed_precision: bfloat16
+  max_grad_norm: 1.0
+  save_every_n_epochs: 1
+  output_dir: "outputs/distilled_pipeline"
+  resume_from_checkpoint: null
+
+pipeline:
+  num_student_ranks: 3
+  teacher_rank: 0
+
+data:
+  dataset: "nvidia/PhysicalAI-Autonomous-Vehicles"
+  clip_ids: null  # null = use all available clips
+  num_workers: 4
+  prefetch_factor: 2
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: ${training.learning_rate}
+  weight_decay: ${training.weight_decay}
+
+lr_scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: ${training.num_epochs}
+  eta_min: 1.0e-6

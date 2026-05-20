@@ -19,51 +19,16 @@ import torch.nn.functional as F
 from typing import Any
 
 
-def _compute_layer_mapping(
-    n_teacher_layers: int, n_student_layers: int,
-) -> list[int]:
-    """Compute which teacher layers to align with each student layer.
+def _uniform_index_mapping(n_total: int, n_subset: int) -> list[int]:
+    """Uniformly sample n_subset indices from [0, n_total).
 
-    Uniformly samples n_student_layers indices from [0, n_teacher_layers).
-
-    Args:
-        n_teacher_layers: Number of layers in the teacher Expert.
-        n_student_layers: Number of layers in the student Expert.
-
-    Returns:
-        List of teacher layer indices, one per student layer.
+    E.g., 36→24 layers, or 10→4 diffusion steps.
     """
-    if n_teacher_layers == n_student_layers:
-        return list(range(n_teacher_layers))
-    return [
-        round(i * (n_teacher_layers - 1) / (n_student_layers - 1))
-        for i in range(n_student_layers)
-    ]
-
-
-def _compute_step_mapping(
-    n_teacher_steps: int, n_student_steps: int,
-) -> list[int]:
-    """Compute which teacher diffusion steps to align with each student step.
-
-    Uniformly samples n_student_steps indices from [0, n_teacher_steps).
-    E.g., 10 teacher steps -> 4 student steps maps to [0, 3, 6, 9].
-
-    Args:
-        n_teacher_steps: Number of diffusion steps in the teacher.
-        n_student_steps: Number of diffusion steps in the student.
-
-    Returns:
-        List of teacher step indices, one per student step.
-    """
-    if n_teacher_steps == n_student_steps:
-        return list(range(n_teacher_steps))
-    if n_student_steps == 1:
-        return [n_teacher_steps - 1]
-    return [
-        round(i * (n_teacher_steps - 1) / (n_student_steps - 1))
-        for i in range(n_student_steps)
-    ]
+    if n_total == n_subset:
+        return list(range(n_total))
+    if n_subset == 1:
+        return [n_total - 1]
+    return [round(i * (n_total - 1) / (n_subset - 1)) for i in range(n_subset)]
 
 
 def vlm_logits_kd_loss(
@@ -136,7 +101,7 @@ def hidden_kd_loss(
     n_teacher = len(teacher_hiddens)
 
     if layer_mapping is None:
-        layer_mapping = _compute_layer_mapping(n_teacher, n_student)
+        layer_mapping = _uniform_index_mapping(n_teacher, n_student)
 
     assert len(layer_mapping) == n_student, (
         f"layer_mapping length ({len(layer_mapping)}) must match "
@@ -328,7 +293,7 @@ class DistillationLoss(nn.Module):
         ):
             n_teacher_steps = len(teacher_expert_hiddens)
             n_student_steps = len(student_expert_hiddens)
-            step_mapping = _compute_step_mapping(n_teacher_steps, n_student_steps)
+            step_mapping = _uniform_index_mapping(n_teacher_steps, n_student_steps)
 
             expert_hidden_loss = torch.zeros((), device=device)
             for s_step, t_step in enumerate(step_mapping):
