@@ -11,7 +11,7 @@ This is a **distillation project** for Alpamayo 1.5, NVIDIA's Vision-Language-Ac
 ```
 src/alpamayo1_5/           # Original inference code (teacher model, untouched)
 src/alpamayo1_5_distill/   # Distillation package (student model, losses, teacher wrapper)
-configs/                   # Hydra configs (distill.yaml, eval.yaml)
+configs/                   # Hydra configs (distill.yaml, distill_pipeline.yaml, eval.yaml)
 scripts/                   # Training/eval/data generation scripts
 ```
 
@@ -25,8 +25,11 @@ uv sync --active
 # Flash-attn fallback:
 uv sync --active --no-install-package flash-attn
 
-# Distillation training
+# Distillation training (single GPU)
 python scripts/train_distill.py --config-name=distill
+
+# Pipeline-parallel distillation (4 GPUs)
+torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
 
 # Evaluate student
 python scripts/eval_student.py --config-name=eval
@@ -75,10 +78,15 @@ pytest
 - `src/alpamayo1_5_distill/config.py` — Alpamayo1_5_DistilledConfig (2B defaults, 4-step FM)
 - `src/alpamayo1_5_distill/model.py` — Alpamayo1_5_Distilled (subclass, AutoModel registered)
 - `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with VLM hidden states + Expert hidden states across all diffusion steps
-- `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU
+- `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM) and inference modes
+- `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU, `_uniform_index_mapping`
+- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config, build_dataloader, prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
+- `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv)
+- `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management
 
 **Configs:**
-- `configs/distill.yaml` — Training config (teacher, student, loss weights, optimizer, scheduler)
+- `configs/distill.yaml` — Single-GPU training config (teacher, student, loss weights, optimizer, scheduler)
+- `configs/distill_pipeline.yaml` — Pipeline-parallel training config (4 GPUs, round-robin teacher dispatch)
 - `configs/eval.yaml` — Evaluation config
 
 ## Conventions

@@ -18,19 +18,24 @@ and adds a student model plus teacher/student distillation utilities under
 - Distillation losses: VLM Logits KD, Expert Hidden KD (full diffusion
   trajectory), VLM Hidden KD, and Trajectory L2 — all with grouped learnable
   projections and margin ReLU.
-- Hydra configs and scripts for training, teacher-data generation, and
-  evaluation.
+- Pipeline-parallel training: GPU 0 runs teacher inference, round-robin
+  dispatches results to GPU 1-3 for student DDP training (4×A100).
+- Hydra configs and scripts for single-GPU and pipeline-parallel training,
+  teacher-data generation, and evaluation.
 
 ## Repository Layout
 
 ```text
 .
 ├── configs/
-│   ├── distill.yaml              # Distillation training config
+│   ├── distill.yaml              # Distillation training config (single GPU)
+│   ├── distill_pipeline.yaml     # Pipeline-parallel training config (4 GPUs)
 │   └── eval.yaml                 # Student evaluation config
 ├── notebooks/                    # Original Alpamayo 1.5 example notebooks
 ├── scripts/
-│   ├── train_distill.py          # Online teacher-student distillation
+│   ├── train_distill.py          # Online teacher-student distillation (single GPU)
+│   ├── train_distill_pipeline.py # Pipeline-parallel distillation (4 GPUs)
+│   ├── submit_pipeline.sh        # SLURM launch script for pipeline training
 │   ├── generate_teacher_data.py  # Prototype teacher soft-label cache script
 │   └── eval_student.py           # Prototype student trajectory evaluation
 ├── src/
@@ -105,10 +110,16 @@ hf auth login
 
 ## Training
 
-Run online distillation:
+Run online distillation (single GPU):
 
 ```bash
 python scripts/train_distill.py --config-name=distill
+```
+
+Run pipeline-parallel distillation (4 GPUs):
+
+```bash
+torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
 ```
 
 Useful overrides:
@@ -122,6 +133,22 @@ python scripts/train_distill.py --config-name=distill \
 
 By default, `configs/distill.yaml` points at the gated teacher model and uses a
 development clip fallback when `data.clip_ids` is unset.
+
+### Pipeline Parallelism
+
+The pipeline-parallel mode uses 4 GPUs: rank 0 runs teacher inference and
+round-robin dispatches results to ranks 1-3, which run student training with
+DDP gradient synchronization. This provides true data parallelism (each student
+rank processes a different clip) while keeping the teacher on a dedicated GPU.
+
+```bash
+# Via SLURM
+sbatch scripts/submit_pipeline.sh
+
+# Or directly
+torchrun --nnodes=1 --nproc_per_node=4 \
+    scripts/train_distill_pipeline.py --config-name=distill_pipeline
+```
 
 ## Teacher Data Cache
 
@@ -151,14 +178,17 @@ metrics as a smoke/prototype signal until dataset iteration is implemented.
 - VLM logits KD is skipped when teacher and student vocab dimensions differ.
   This should be made explicit before long training runs.
 - The grouped projections and margin parameters inside `DistillationLoss` are
-  trainable but are not saved by `student.save_pretrained()`. Checkpointing
-  should include this module plus optimizer and scheduler state.
+  trainable. The pipeline-parallel script saves them alongside optimizer and
+  scheduler state in `training_state.pt`; the single-GPU script does not yet
+  save them (needs a similar checkpoint update).
 - Gradient accumulation currently needs careful handling when the final partial
   accumulation window is not full.
 - `data.clip_ids: null` currently falls back to a single development clip, not
   the full dataset.
 - Teacher VLM hidden states require a separate forward pass (`use_cache=False`)
   after generation, which increases peak GPU memory.
+- The pipeline-parallel script loads all clips into memory before dispatching.
+  For large datasets, streaming would reduce memory pressure on rank 0.
 
 ## License
 
