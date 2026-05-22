@@ -25,11 +25,17 @@ uv sync --active
 # Flash-attn fallback:
 uv sync --active --no-install-package flash-attn
 
-# Distillation training (single GPU)
-python scripts/train_distill.py --config-name=distill
+# Download local PhysicalAI AV cache (4 cameras + egomotion, size-capped)
+python scripts/download_dataset_1tb.py --cache-dir ./.cache/ --max-bytes 1e12 --include-metadata
 
-# Pipeline-parallel distillation (4 GPUs)
-torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
+# Validate local data cache
+python scripts/test_downloaded_data.py --cache-dir ./.cache/ --num-clips 5 --no-online-init
+
+# Distillation training (single GPU, local cache)
+python scripts/train_distill.py --config-name=distill data.cache_dir=./.cache/
+
+# Pipeline-parallel distillation (spawn one process per GPU by default, local cache)
+python scripts/train_distill_pipeline.py --config-name=distill_pipeline data.cache_dir=./.cache/
 
 # Evaluate student
 python scripts/eval_student.py --config-name=eval
@@ -80,13 +86,13 @@ pytest
 - `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with VLM hidden states + Expert hidden states across all diffusion steps
 - `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM) and inference modes
 - `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU, `_uniform_index_mapping`
-- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config, build_dataloader, prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
+- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config, resolve_clip_ids, build_dataloader (local cache + shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
 - `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv)
 - `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management
 
 **Configs:**
 - `configs/distill.yaml` — Single-GPU training config (teacher, student, loss weights, optimizer, scheduler)
-- `configs/distill_pipeline.yaml` — Pipeline-parallel training config (4 GPUs, round-robin teacher dispatch)
+- `configs/distill_pipeline.yaml` — Pipeline-parallel training config (spawned ranks, round-robin teacher dispatch)
 - `configs/eval.yaml` — Evaluation config
 
 ## Conventions
@@ -96,6 +102,18 @@ pytest
 - Config sub-dicts use Hydra `_target_` convention for `hydra.utils.instantiate`
 - Original `alpamayo1_5` package is read-only — all distillation code goes in `alpamayo1_5_distill`
 - After every code change or design discussion, update CLAUDE.md and README.md to reflect the current state
+
+## Pipeline Parallelism
+
+`train_distill_pipeline.py` uses `torch.multiprocessing.spawn` instead of `torchrun`. `pipeline.num_processes: null` means use `torch.cuda.device_count()`; students are all ranks except `pipeline.teacher_rank`.
+
+## Data Loading
+
+`build_dataloader(cfg, epoch=...)` supports two modes:
+- `data.cache_dir: null` — stream from HuggingFace Hub with `maybe_stream=True` and the legacy single-clip fallback when `clip_ids` is null.
+- `data.cache_dir: ./path` — read only from local HF cache with `maybe_stream=False`; when `clip_ids` is null it auto-detects all downloaded chunks and uses all cached clips.
+
+Training configs include `data.revision`, `data.shuffle`, and `data.seed`. Shuffle uses `seed + epoch` so each epoch changes order while remaining reproducible.
 
 ## Flash Attention Fallback
 

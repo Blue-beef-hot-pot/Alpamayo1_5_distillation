@@ -8,6 +8,7 @@ that combines the student model and distillation loss for DDP wrapping.
 """
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -93,31 +94,31 @@ class StudentWithLoss(torch.nn.Module):
         return losses
 
 
-def setup_distributed() -> tuple[int, int]:
-    """Initialize NCCL process group and set CUDA device.
+def setup_distributed(
+    rank: int | None = None,
+    world_size: int | None = None,
+    local_rank: int | None = None,
+) -> tuple[int, int]:
+    """Initialize NCCL process group and set CUDA device."""
+    if rank is not None:
+        os.environ["RANK"] = str(rank)
+    if world_size is not None:
+        os.environ["WORLD_SIZE"] = str(world_size)
+    if local_rank is not None:
+        os.environ["LOCAL_RANK"] = str(local_rank)
 
-    Returns:
-        Tuple of (rank, world_size).
-    """
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    torch.cuda.set_device(rank)
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    torch.cuda.set_device(local_rank)
     logger.info("Initialized distributed: rank %d / %d", rank, world_size)
     return rank, world_size
 
 
-def create_student_group(num_student_ranks: int = 3) -> dist.ProcessGroup | None:
-    """Create a process group for student DDP ranks.
-
-    Args:
-        num_student_ranks: Number of student ranks (ranks 1..num_student_ranks).
-
-    Returns:
-        ProcessGroup for student ranks, or None if this rank is not a student.
-    """
+def create_student_group(student_ranks: list[int]) -> dist.ProcessGroup | None:
+    """Create a process group for student DDP ranks."""
     rank = dist.get_rank()
-    student_ranks = list(range(1, 1 + num_student_ranks))
     group = dist.new_group(ranks=student_ranks)
     return group if rank in student_ranks else None
 

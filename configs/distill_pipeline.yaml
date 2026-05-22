@@ -1,9 +1,10 @@
 # Alpamayo 1.5 Pipeline-Parallel Distillation Training Configuration
 #
-# Usage: torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
+# Usage: python scripts/train_distill_pipeline.py --config-name=distill_pipeline
 
-defaults:
-  - override hydra/job_chdir: false
+hydra:
+  job:
+    chdir: false
 
 teacher:
   model_name: "nvidia/Alpamayo-1.5-10B"
@@ -40,14 +41,18 @@ training:
   resume_from_checkpoint: null
 
 pipeline:
-  num_student_ranks: 3
+  num_processes: null  # null = use torch.cuda.device_count(); students = num_processes - 1
   teacher_rank: 0
+  master_addr: "127.0.0.1"
+  master_port: 29500
 
 data:
   dataset: "nvidia/PhysicalAI-Autonomous-Vehicles"
-  clip_ids: null  # null = use all available clips
-  num_workers: 4
-  prefetch_factor: 2
+  cache_dir: null       # Local HF cache dir; null = stream from HF Hub
+  revision: "b719eea7f0a63619ef51ec7f54178af0937ef050"
+  clip_ids: null        # null + cache_dir set = auto-detect all downloaded clips
+  shuffle: true
+  seed: 42
 
 optimizer:
   _target_: torch.optim.AdamW

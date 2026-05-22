@@ -29,13 +29,15 @@ and adds a student model plus teacher/student distillation utilities under
 .
 ├── configs/
 │   ├── distill.yaml              # Distillation training config (single GPU)
-│   ├── distill_pipeline.yaml     # Pipeline-parallel training config (4 GPUs)
+│   ├── distill_pipeline.yaml     # Pipeline-parallel training config (spawned multi-GPU)
 │   └── eval.yaml                 # Student evaluation config
 ├── notebooks/                    # Original Alpamayo 1.5 example notebooks
 ├── scripts/
 │   ├── train_distill.py          # Online teacher-student distillation (single GPU)
-│   ├── train_distill_pipeline.py # Pipeline-parallel distillation (4 GPUs)
+│   ├── train_distill_pipeline.py # Pipeline-parallel distillation (spawned multi-GPU)
 │   ├── submit_pipeline.sh        # SLURM launch script for pipeline training
+│   ├── download_dataset_1tb.py   # Size-capped PhysicalAI AV cache downloader
+│   ├── test_downloaded_data.py   # Local dataset loading / inference smoke test
 │   ├── generate_teacher_data.py  # Prototype teacher soft-label cache script
 │   └── eval_student.py           # Prototype student trajectory evaluation
 ├── src/
@@ -108,46 +110,79 @@ Authenticate with Hugging Face before running model or dataset code:
 hf auth login
 ```
 
+## Local Dataset Cache
+
+Download a size-capped subset of the PhysicalAI AV dataset containing the
+features used by training (4 cameras + egomotion):
+
+```bash
+python scripts/download_dataset_1tb.py --cache-dir ./.cache/ --max-bytes 1e12 --include-metadata
+```
+
+Validate local data loading without network access:
+
+```bash
+python scripts/test_downloaded_data.py --cache-dir ./.cache/ --num-clips 5 --no-online-init
+```
+
+Run a full teacher inference smoke test on one downloaded clip:
+
+```bash
+python scripts/test_downloaded_data.py --cache-dir ./.cache/ --num-clips 1 --inference --no-online-init
+```
+
 ## Training
 
 Run online distillation (single GPU):
 
 ```bash
+# From local cache (recommended):
+python scripts/train_distill.py --config-name=distill data.cache_dir=./.cache/
+
+# Or stream from HF Hub (no local cache):
 python scripts/train_distill.py --config-name=distill
 ```
 
-Run pipeline-parallel distillation (4 GPUs):
+Run pipeline-parallel distillation (spawns one process per GPU by default):
 
 ```bash
-torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
+python scripts/train_distill_pipeline.py --config-name=distill_pipeline data.cache_dir=./.cache/
+
+# Or override the process count explicitly:
+python scripts/train_distill_pipeline.py --config-name=distill_pipeline \
+  data.cache_dir=./.cache/ pipeline.num_processes=4
 ```
 
 Useful overrides:
 
 ```bash
 python scripts/train_distill.py --config-name=distill \
+  data.cache_dir=./.cache/ \
   training.num_epochs=20 \
   training.gradient_accumulation_steps=4 \
   teacher.num_traj_samples=6
 ```
 
-By default, `configs/distill.yaml` points at the gated teacher model and uses a
-development clip fallback when `data.clip_ids` is unset.
+When `data.cache_dir` is set, the dataloader reads from the local HF cache
+(using `download_dataset_1tb.py` output) with `maybe_stream=False` and
+auto-detects all downloaded clips. When unset, it falls back to streaming from
+HF Hub. Shuffling is enabled by default (`data.shuffle=true`, `data.seed=42`).
 
 ### Pipeline Parallelism
 
-The pipeline-parallel mode uses 4 GPUs: rank 0 runs teacher inference and
-round-robin dispatches results to ranks 1-3, which run student training with
-DDP gradient synchronization. This provides true data parallelism (each student
-rank processes a different clip) while keeping the teacher on a dedicated GPU.
+The pipeline-parallel mode uses `torch.multiprocessing.spawn`: one configured
+teacher rank runs teacher inference and round-robin dispatches results to all
+other ranks, which run student training with DDP gradient synchronization. By
+default `pipeline.num_processes=null` uses `torch.cuda.device_count()`, so the
+number of students is `num_processes - 1`.
 
 ```bash
 # Via SLURM
 sbatch scripts/submit_pipeline.sh
 
 # Or directly
-torchrun --nnodes=1 --nproc_per_node=4 \
-    scripts/train_distill_pipeline.py --config-name=distill_pipeline
+python scripts/train_distill_pipeline.py --config-name=distill_pipeline \
+    data.cache_dir=./.cache/
 ```
 
 ## Teacher Data Cache

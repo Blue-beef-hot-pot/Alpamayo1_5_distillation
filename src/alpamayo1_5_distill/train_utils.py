@@ -3,8 +3,16 @@
 
 """Shared training utilities used by both single-GPU and pipeline training scripts."""
 
+from __future__ import annotations
+
+import json
+import random
+from pathlib import Path
 from typing import Any
 
+import huggingface_hub
+import pandas as pd
+import physical_ai_av
 import torch
 
 from alpamayo1_5 import helper
@@ -12,6 +20,67 @@ from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 from alpamayo1_5_distill.config import Alpamayo1_5_DistilledConfig
 
 from omegaconf import DictConfig
+
+
+def _find_cached_file(cache_dir: Path, filename: str) -> Path | None:
+    """Locate a file inside the HF cache layout by name (any snapshot)."""
+    matches = [m for m in cache_dir.rglob(filename) if "snapshots" in m.parts]
+    return matches[0] if matches else None
+
+
+def _build_avdi(
+    cache_dir: str | None, revision: str | None
+) -> physical_ai_av.PhysicalAIAVDatasetInterface:
+    """Build PhysicalAIAVDatasetInterface from local cache when cache_dir is set."""
+    if cache_dir is None:
+        return physical_ai_av.PhysicalAIAVDatasetInterface()
+
+    avdi = physical_ai_av.PhysicalAIAVDatasetInterface.__new__(
+        physical_ai_av.PhysicalAIAVDatasetInterface
+    )
+    avdi.token = None
+    avdi.api = huggingface_hub.HfApi(token=None)
+    avdi.fs = huggingface_hub.HfFileSystem(token=None)
+    avdi.repo_id = "nvidia/PhysicalAI-Autonomous-Vehicles"
+    avdi.repo_type = "dataset"
+    avdi.revision = revision
+    avdi.repo_snapshot_info = {
+        "repo_id": avdi.repo_id,
+        "repo_type": avdi.repo_type,
+        "revision": revision,
+    }
+    avdi.cache_dir = cache_dir
+    avdi.local_dir = None
+    avdi.confirm_download_threshold_gb = float("inf")
+
+    features_csv = _find_cached_file(Path(cache_dir), "features.csv")
+    clip_index_path = _find_cached_file(Path(cache_dir), "clip_index.parquet")
+    if features_csv is None or clip_index_path is None:
+        raise FileNotFoundError(
+            "Metadata (features.csv / clip_index.parquet) not found in cache. "
+            "Re-run download with --include-metadata."
+        )
+    features_df = pd.read_csv(features_csv, index_col="feature")
+    features_df["clip_files_in_zip"] = features_df["clip_files_in_zip"].map(
+        json.loads, na_action="ignore"
+    )
+    avdi.features = physical_ai_av.dataset.Features(features_df)
+    avdi.clip_index = pd.read_parquet(clip_index_path)
+    if "clip_id" in avdi.clip_index.columns:
+        avdi.clip_index = avdi.clip_index.set_index("clip_id")
+    return avdi
+
+
+def _get_cached_clip_ids(avdi: physical_ai_av.PhysicalAIAVDatasetInterface) -> list[str]:
+    """Return list of clip_ids whose egomotion chunk is present in local cache."""
+    valid = avdi.clip_index[avdi.clip_index["clip_is_valid"]]
+    downloaded_chunks: set[int] = set()
+    for chunk_idx in sorted(valid["chunk"].unique()):
+        chunk_idx = int(chunk_idx)
+        fname = f"labels/egomotion/egomotion.chunk_{chunk_idx:04d}.zip"
+        if avdi.is_file_cached(fname):
+            downloaded_chunks.add(chunk_idx)
+    return valid[valid["chunk"].isin(downloaded_chunks)].index.tolist()
 
 
 def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
@@ -42,14 +111,37 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
     )
 
 
-def build_dataloader(cfg: DictConfig):
-    """Yield clip data dicts for training."""
+def resolve_clip_ids(cfg: DictConfig, epoch: int = 0) -> list[str]:
+    """Resolve clip IDs for one epoch without loading clip tensors."""
+    cache_dir = cfg.data.get("cache_dir")
     clip_ids = cfg.data.get("clip_ids")
     if not clip_ids:
-        clip_ids = ["030c760c-ae38-49aa-9ad8-f5650a545d26"]
+        if cache_dir is not None:
+            avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
+            clip_ids = _get_cached_clip_ids(avdi)
+            if not clip_ids:
+                raise RuntimeError(f"No clips found in cache_dir={cache_dir}")
+        else:
+            clip_ids = ["030c760c-ae38-49aa-9ad8-f5650a545d26"]
+
+    clip_ids = list(clip_ids)
+    if cfg.data.get("shuffle", True):
+        seed = cfg.data.get("seed", 42)
+        rng = random.Random(seed + epoch)
+        rng.shuffle(clip_ids)
+    return clip_ids
+
+
+def build_dataloader(cfg: DictConfig, epoch: int = 0):
+    """Yield clip data dicts for training, loading from local cache when available."""
+    cache_dir = cfg.data.get("cache_dir")
+    avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
+    clip_ids = resolve_clip_ids(cfg, epoch=epoch)
+    maybe_stream = cache_dir is None
     for clip_id in clip_ids:
-        data = load_physical_aiavdataset(clip_id, t0_us=5_100_000)
-        yield data
+        yield load_physical_aiavdataset(
+            clip_id, avdi=avdi, maybe_stream=maybe_stream, t0_us=5_100_000
+        )
 
 
 def prepare_model_inputs(data: dict, processor, device: str) -> dict:

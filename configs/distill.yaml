@@ -35,9 +35,11 @@ training:
 
 data:
   dataset: "nvidia/PhysicalAI-Autonomous-Vehicles"
-  clip_ids: null  # null = use all available clips
-  num_workers: 4
-  prefetch_factor: 2
+  cache_dir: null       # Local HF cache dir; null = stream from HF Hub
+  revision: "b719eea7f0a63619ef51ec7f54178af0937ef050"
+  clip_ids: null        # null + cache_dir set = auto-detect all downloaded clips
+  shuffle: true
+  seed: 42
 
 optimizer:
   _target_: torch.optim.AdamW

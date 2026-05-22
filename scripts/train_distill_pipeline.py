@@ -3,23 +3,26 @@
 
 """Pipeline-parallel distillation training for Alpamayo 1.5.
 
-Runs on 4 GPUs: rank 0 runs teacher inference and dispatches results
-round-robin to ranks 1-3, which run student DDP training.
+Spawns one process per pipeline worker: the configured teacher rank runs
+teacher inference and dispatches results round-robin to all other ranks, which
+run student DDP training.
 
 Usage:
-    torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py --config-name=distill_pipeline
+    python scripts/train_distill_pipeline.py --config-name=distill_pipeline
 
 Or with overrides:
-    torchrun --nproc_per_node=4 scripts/train_distill_pipeline.py \
-        --config-name=distill_pipeline training.num_epochs=20
+    python scripts/train_distill_pipeline.py --config-name=distill_pipeline \
+        pipeline.num_processes=4 training.num_epochs=20
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 import hydra
 import torch
+import torch.multiprocessing as mp
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 
@@ -27,7 +30,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpamayo1_5 import helper
 from alpamayo1_5_distill.comm import recv_teacher_bundle, send_termination, send_teacher_bundle
-from alpamayo1_5_distill.config import Alpamayo1_5_DistilledConfig
 from alpamayo1_5_distill.distill_loss import DistillationLoss
 from alpamayo1_5_distill.distributed import (
     StudentWithLoss,
@@ -41,9 +43,31 @@ from alpamayo1_5_distill.train_utils import (
     build_dataloader,
     build_student_config,
     prepare_model_inputs,
+    resolve_clip_ids,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def infer_pipeline_process_count(configured: int | None, cuda_device_count: int) -> int:
+    """Infer pipeline process count from config or available CUDA devices."""
+    num_processes = configured if configured is not None else cuda_device_count
+    if num_processes < 2:
+        raise ValueError(
+            "Pipeline training requires at least 2 processes: 1 teacher + >=1 student."
+        )
+    return num_processes
+
+
+def infer_student_ranks(world_size: int, teacher_rank: int) -> list[int]:
+    """Return all ranks except teacher_rank, validating the pipeline shape."""
+    if world_size < 2:
+        raise ValueError(
+            "Pipeline training requires at least 2 processes: 1 teacher + >=1 student."
+        )
+    if teacher_rank < 0 or teacher_rank >= world_size:
+        raise ValueError(f"teacher_rank={teacher_rank} must be in [0, {world_size})")
+    return [rank for rank in range(world_size) if rank != teacher_rank]
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +75,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def run_teacher_loop(cfg: DictConfig, rank: int) -> None:
+def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> None:
     """Teacher loop: load clips, run teacher_forward, dispatch to student ranks."""
     device = f"cuda:{rank}"
     teacher = load_teacher(
@@ -59,14 +83,14 @@ def run_teacher_loop(cfg: DictConfig, rank: int) -> None:
         device=device,
         dtype=getattr(torch, cfg.teacher.dtype),
     )
-    logger.info("[Rank 0] Teacher model loaded: %s", cfg.teacher.model_name)
+    logger.info("[Teacher] Teacher model loaded: %s", cfg.teacher.model_name)
 
     processor = helper.get_processor(teacher.tokenizer)
-    num_student_ranks = cfg.pipeline.num_student_ranks
+    num_student_ranks = len(student_ranks)
     grad_accum = cfg.training.gradient_accumulation_steps
 
     for epoch in range(cfg.training.num_epochs):
-        clips = list(build_dataloader(cfg))
+        clips = list(build_dataloader(cfg, epoch=epoch))
         n_clips = len(clips)
 
         # Pad to multiple of num_student_ranks * grad_accum so each student
@@ -77,11 +101,11 @@ def run_teacher_loop(cfg: DictConfig, rank: int) -> None:
             clips = clips + clips[:pad_count]
 
         logger.info(
-            "[Rank 0] Epoch %d: %d clips (padded to %d)", epoch, n_clips, len(clips)
+            "[Teacher] Epoch %d: %d clips (padded to %d)", epoch, n_clips, len(clips)
         )
 
         for i, data in enumerate(clips):
-            target_rank = 1 + (i % num_student_ranks)
+            target_rank = student_ranks[i % num_student_ranks]
             model_inputs = prepare_model_inputs(data, processor, device)
 
             with torch.no_grad():
@@ -100,16 +124,16 @@ def run_teacher_loop(cfg: DictConfig, rank: int) -> None:
             del teacher_out, data
 
             if i % 10 == 0:
-                logger.info("[Rank 0] Epoch %d: sent clip %d to rank %d", epoch, i, target_rank)
+                logger.info("[Teacher] Epoch %d: sent clip %d to rank %d", epoch, i, target_rank)
 
         # Send termination signal to all student ranks
-        for r in range(1, 1 + num_student_ranks):
-            send_termination(r, device=torch.device(device))
+        for student_rank in student_ranks:
+            send_termination(student_rank, device=torch.device(device))
 
         dist.barrier()
-        logger.info("[Rank 0] Epoch %d complete", epoch)
+        logger.info("[Teacher] Epoch %d complete", epoch)
 
-    logger.info("[Rank 0] Training complete")
+    logger.info("[Teacher] Training complete")
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +141,9 @@ def run_teacher_loop(cfg: DictConfig, rank: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_student_loop(cfg: DictConfig, rank: int, student_group) -> None:
+def run_student_loop(
+    cfg: DictConfig, rank: int, student_group, student_ranks: list[int], teacher_rank: int
+) -> None:
     """Student loop: receive teacher output, run student forward/backward, DDP sync."""
     device = f"cuda:{rank}"
 
@@ -155,10 +181,9 @@ def run_student_loop(cfg: DictConfig, rank: int, student_group) -> None:
     all_params = list(ddp_model.parameters())
     optimizer = hydra.utils.instantiate(cfg.optimizer, params=all_params)
 
-    clip_ids = cfg.data.get("clip_ids")
-    num_clips_per_epoch = len(clip_ids) if clip_ids else 1
+    num_clips_per_epoch = len(resolve_clip_ids(cfg, epoch=0))
     grad_accum = cfg.training.gradient_accumulation_steps
-    num_student_ranks = cfg.pipeline.num_student_ranks
+    num_student_ranks = len(student_ranks)
 
     # Pad clip count same as teacher does
     window = num_student_ranks * grad_accum
@@ -181,7 +206,7 @@ def run_student_loop(cfg: DictConfig, rank: int, student_group) -> None:
     global_step = 0
     best_loss = float("inf")
     output_dir = Path(cfg.training.output_dir)
-    save_rank = 1  # Only rank 1 saves checkpoints
+    save_rank = student_ranks[0]
 
     for epoch in range(cfg.training.num_epochs):
         ddp_model.train()
@@ -191,7 +216,7 @@ def run_student_loop(cfg: DictConfig, rank: int, student_group) -> None:
         optimizer.zero_grad()
 
         while True:
-            bundle = recv_teacher_bundle(src=0, device=torch.device(device))
+            bundle = recv_teacher_bundle(src=teacher_rank, device=torch.device(device))
             if bundle is None:
                 break
 
@@ -245,7 +270,9 @@ def run_student_loop(cfg: DictConfig, rank: int, student_group) -> None:
 
             if avg_loss < best_loss:
                 best_loss = avg_loss
-                _save_checkpoint(ddp_model, optimizer, scheduler, epoch, global_step, output_dir / "best")
+                _save_checkpoint(
+                    ddp_model, optimizer, scheduler, epoch, global_step, output_dir / "best"
+                )
                 logger.info("[Rank %d] New best model saved", rank)
 
     # Save final model
@@ -285,23 +312,36 @@ def _save_checkpoint(
 # ---------------------------------------------------------------------------
 
 
+def pipeline_worker(local_rank: int, world_size: int, cfg: DictConfig) -> None:
+    """Worker process launched by torch.multiprocessing.spawn."""
+    os.environ.setdefault("MASTER_ADDR", cfg.pipeline.get("master_addr", "127.0.0.1"))
+    os.environ.setdefault("MASTER_PORT", str(cfg.pipeline.get("master_port", 29500)))
+
+    rank, world_size = setup_distributed(
+        rank=local_rank,
+        world_size=world_size,
+        local_rank=local_rank,
+    )
+    teacher_rank = cfg.pipeline.get("teacher_rank", 0)
+    student_ranks = infer_student_ranks(world_size, teacher_rank)
+    student_group = create_student_group(student_ranks) if rank in student_ranks else None
+
+    if rank == teacher_rank:
+        run_teacher_loop(cfg, rank, student_ranks)
+    else:
+        run_student_loop(cfg, rank, student_group, student_ranks, teacher_rank)
+
+    dist.destroy_process_group()
+
+
 @hydra.main(config_path="../configs", config_name="distill_pipeline", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     """Run pipeline-parallel distillation training."""
     logger.info("Configuration:\n%s", OmegaConf.to_yaml(cfg))
-
-    rank, world_size = setup_distributed()
-    assert world_size == 4, f"Expected 4 GPUs, got {world_size}"
-
-    is_student = rank > 0
-    student_group = create_student_group(cfg.pipeline.num_student_ranks) if is_student else None
-
-    if rank == 0:
-        run_teacher_loop(cfg, rank)
-    else:
-        run_student_loop(cfg, rank, student_group)
-
-    dist.destroy_process_group()
+    num_processes = infer_pipeline_process_count(
+        cfg.pipeline.get("num_processes"), torch.cuda.device_count()
+    )
+    mp.spawn(pipeline_worker, args=(num_processes, cfg), nprocs=num_processes, join=True)
 
 
 if __name__ == "__main__":
