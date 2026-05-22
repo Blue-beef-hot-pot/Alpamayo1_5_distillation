@@ -226,3 +226,4 @@ log/
 .codex
 .omx/
 CLAUDE.log
+.cache/
