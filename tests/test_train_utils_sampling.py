@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+import torch
 from omegaconf import OmegaConf
 
 from alpamayo1_5.models.base_model import ReasoningVLAConfig
@@ -8,6 +9,7 @@ from alpamayo1_5_distill import train_utils
 from alpamayo1_5_distill.train_utils import (
     _sample_t0s_from_time_range,
     build_student_config,
+    repeat_visual_inputs,
     resolve_clip_samples,
 )
 
@@ -132,6 +134,50 @@ def test_sample_t0s_from_time_range_skips_too_short_clip() -> None:
         future_us=6_400_000,
         step_us=1_000_000,
     ) == []
+
+
+def test_repeat_visual_inputs_repeats_flattened_qwen_pixel_values_by_grid_patch_counts() -> None:
+    image_grid_thw = torch.tensor([[1, 2, 3], [2, 1, 2]])
+    pixel_values = torch.arange(10).view(10, 1)
+
+    out = repeat_visual_inputs(
+        {"image_grid_thw": image_grid_thw, "pixel_values": pixel_values},
+        batch_size=1,
+        num_traj_samples=3,
+    )
+
+    assert out["image_grid_thw"].tolist() == [[1, 2, 3]] * 3 + [[2, 1, 2]] * 3
+    expected = torch.cat(
+        [
+            pixel_values[:6],
+            pixel_values[:6],
+            pixel_values[:6],
+            pixel_values[6:],
+            pixel_values[6:],
+            pixel_values[6:],
+        ],
+        dim=0,
+    )
+    assert torch.equal(out["pixel_values"], expected)
+
+
+def test_repeat_visual_inputs_repeats_list_pixel_values_preserving_per_image_order() -> None:
+    image_grid_thw = torch.tensor([[1, 1, 2], [1, 1, 3]])
+    pixels = [torch.tensor([[1], [2]]), torch.tensor([[3], [4], [5]])]
+
+    out = repeat_visual_inputs(
+        {"image_grid_thw": image_grid_thw, "pixel_values": pixels},
+        batch_size=1,
+        num_traj_samples=2,
+    )
+
+    assert out["image_grid_thw"].tolist() == [[1, 1, 2], [1, 1, 2], [1, 1, 3], [1, 1, 3]]
+    assert [p.tolist() for p in out["pixel_values"]] == [
+        pixels[0].tolist(),
+        pixels[0].tolist(),
+        pixels[1].tolist(),
+        pixels[1].tolist(),
+    ]
 
 
 def test_resolve_clip_samples_shuffles_samples_by_epoch(monkeypatch) -> None:

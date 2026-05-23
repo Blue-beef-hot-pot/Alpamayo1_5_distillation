@@ -299,12 +299,37 @@ def repeat_visual_inputs(
 ) -> dict[str, torch.Tensor]:
     """Repeat visual tensors to match num_return_sequences batch expansion."""
     visual_kwargs: dict[str, Any] = {}
-    for key in ("pixel_values", "image_grid_thw", "image_grid_thw_batch"):
-        if key in tokenized_data:
-            val = tokenized_data[key]
-            if isinstance(val, torch.Tensor) and val.shape[0] == batch_size:
-                val = val.repeat_interleave(num_traj_samples, dim=0)
-            visual_kwargs[key] = val
+    image_grid_thw = tokenized_data.get("image_grid_thw")
+    patch_counts = None
+    if isinstance(image_grid_thw, torch.Tensor):
+        patch_counts = image_grid_thw.prod(dim=1).tolist()
+
+    if "pixel_values" in tokenized_data:
+        pixel_values = tokenized_data["pixel_values"]
+        if isinstance(pixel_values, torch.Tensor) and patch_counts is not None:
+            if pixel_values.shape[0] == sum(patch_counts):
+                chunks = torch.split(pixel_values, patch_counts, dim=0)
+                pixel_values = torch.cat(
+                    [chunk for chunk in chunks for _ in range(num_traj_samples)], dim=0
+                )
+            elif pixel_values.shape[0] == batch_size:
+                pixel_values = pixel_values.repeat_interleave(num_traj_samples, dim=0)
+        elif isinstance(pixel_values, list):
+            pixel_values = [item for item in pixel_values for _ in range(num_traj_samples)]
+        visual_kwargs["pixel_values"] = pixel_values
+
+    if isinstance(image_grid_thw, torch.Tensor):
+        visual_kwargs["image_grid_thw"] = image_grid_thw.repeat_interleave(
+            num_traj_samples, dim=0
+        )
+    elif image_grid_thw is not None:
+        visual_kwargs["image_grid_thw"] = image_grid_thw
+
+    if "image_grid_thw_batch" in tokenized_data:
+        val = tokenized_data["image_grid_thw_batch"]
+        if isinstance(val, torch.Tensor) and val.shape[0] == batch_size:
+            val = val.repeat_interleave(num_traj_samples, dim=0)
+        visual_kwargs["image_grid_thw_batch"] = val
     return visual_kwargs
 
 
