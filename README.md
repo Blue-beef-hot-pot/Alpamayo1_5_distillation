@@ -185,7 +185,9 @@ When `data.cache_dir` is set, the dataloader reads from the local HF cache
 (using `download_dataset_1tb.py` output) with `maybe_stream=False` and
 auto-detects all downloaded clips. Training samples are `(clip_id, t0_us)` pairs:
 each selected clip is sampled every 1 second by default (`data.sample_step_us=1000000`)
-inside the valid egomotion window, aligned to the 0.1s data grid and leaving 1.5s for history plus 6.4s for future.
+inside the common valid timestamp range of egomotion and the four required cameras,
+aligned to the 0.1s data grid, leaving 1.5s for trajectory history, 6.4s for trajectory future,
+and enough camera history for the 4-frame image window ending at `t0_us`.
 When cache is unset, it falls back to streaming from HF Hub. Shuffling is enabled
 by default (`data.shuffle=true`, `data.seed=42`) and applies at sample level.
 

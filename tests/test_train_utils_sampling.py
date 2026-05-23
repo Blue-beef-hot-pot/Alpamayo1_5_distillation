@@ -11,9 +11,20 @@ class _FakeEgomotion:
         self.time_range = (t_min, t_max)
 
 
+class _FakeCamera:
+    def __init__(self, t_min: int, t_max: int) -> None:
+        self.time_range = (t_min, t_max)
+
+
 class _FakeFeatures:
     class LABELS:
         EGOMOTION = "egomotion"
+
+    class CAMERA:
+        CAMERA_CROSS_LEFT_120FOV = "camera_cross_left_120fov"
+        CAMERA_FRONT_WIDE_120FOV = "camera_front_wide_120fov"
+        CAMERA_CROSS_RIGHT_120FOV = "camera_cross_right_120fov"
+        CAMERA_FRONT_TELE_30FOV = "camera_front_tele_30fov"
 
 
 class _FakeAvdi:
@@ -24,10 +35,20 @@ class _FakeAvdi:
             "clip-a": (0, 10_000_000),
             "clip-b": (0, 9_000_000),
         }
+        self.camera_ranges = {
+            clip_id: {
+                self.features.CAMERA.CAMERA_CROSS_LEFT_120FOV: time_range,
+                self.features.CAMERA.CAMERA_FRONT_WIDE_120FOV: time_range,
+                self.features.CAMERA.CAMERA_CROSS_RIGHT_120FOV: time_range,
+                self.features.CAMERA.CAMERA_FRONT_TELE_30FOV: time_range,
+            }
+            for clip_id, time_range in self.ranges.items()
+        }
 
     def get_clip_feature(self, clip_id, feature, maybe_stream=False):
-        assert feature == "egomotion"
-        return _FakeEgomotion(*self.ranges[clip_id])
+        if feature == self.features.LABELS.EGOMOTION:
+            return _FakeEgomotion(*self.ranges[clip_id])
+        return _FakeCamera(*self.camera_ranges[clip_id][feature])
 
 
 def _cfg() -> OmegaConf:
@@ -104,3 +125,56 @@ def test_resolve_clip_samples_shuffles_samples_by_epoch(monkeypatch) -> None:
     )
     assert epoch0 == epoch0_again
     assert epoch0 != epoch1
+
+
+def test_resolve_clip_samples_clamps_to_camera_max_range(monkeypatch) -> None:
+    cfg = OmegaConf.create(
+        {
+            "data": {
+                "cache_dir": "./.cache/",
+                "revision": "rev",
+                "clip_ids": ["clip-a"],
+                "shuffle": False,
+                "seed": 42,
+                "sample_step_us": 1_000_000,
+                "history_us": 0,
+                "future_us": 0,
+            }
+        }
+    )
+    avdi = _FakeAvdi()
+    avdi.ranges["clip-a"] = (0, 30_000_000)
+    for camera_feature in avdi.camera_ranges["clip-a"]:
+        avdi.camera_ranges["clip-a"][camera_feature] = (0, 20_000_000)
+    monkeypatch.setattr(train_utils, "_build_avdi", lambda cache_dir, revision: avdi)
+
+    samples = resolve_clip_samples(cfg, epoch=0)
+
+    assert samples
+    assert max(t0_us for _, t0_us in samples) <= 20_000_000
+
+
+def test_resolve_clip_samples_accounts_for_camera_image_history(monkeypatch) -> None:
+    cfg = OmegaConf.create(
+        {
+            "data": {
+                "cache_dir": "./.cache/",
+                "revision": "rev",
+                "clip_ids": ["clip-a"],
+                "shuffle": False,
+                "seed": 42,
+                "sample_step_us": 100_000,
+                "history_us": 0,
+                "future_us": 0,
+            }
+        }
+    )
+    avdi = _FakeAvdi()
+    avdi.ranges["clip-a"] = (0, 5_000_000)
+    for camera_feature in avdi.camera_ranges["clip-a"]:
+        avdi.camera_ranges["clip-a"][camera_feature] = (1_000_000, 5_000_000)
+    monkeypatch.setattr(train_utils, "_build_avdi", lambda cache_dir, revision: avdi)
+
+    samples = resolve_clip_samples(cfg, epoch=0)
+
+    assert samples[0] == ("clip-a", 1_300_000)

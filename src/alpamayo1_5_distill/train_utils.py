@@ -92,6 +92,15 @@ def _get_cached_clip_ids(avdi: physical_ai_av.PhysicalAIAVDatasetInterface) -> l
     return valid[valid["chunk"].isin(downloaded_chunks)].index.tolist()
 
 
+def _get_training_camera_features(avdi: physical_ai_av.PhysicalAIAVDatasetInterface) -> list[str]:
+    return [
+        avdi.features.CAMERA.CAMERA_CROSS_LEFT_120FOV,
+        avdi.features.CAMERA.CAMERA_FRONT_WIDE_120FOV,
+        avdi.features.CAMERA.CAMERA_CROSS_RIGHT_120FOV,
+        avdi.features.CAMERA.CAMERA_FRONT_TELE_30FOV,
+    ]
+
+
 def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
     """Build student config from Hydra config."""
     diffusion_cfg = {
@@ -161,6 +170,32 @@ def _sample_t0s_from_time_range(
     return list(range(t0_start, t0_end + 1, step_us))
 
 
+def _resolve_sample_time_range(
+    avdi: physical_ai_av.PhysicalAIAVDatasetInterface,
+    clip_id: str,
+    maybe_stream: bool,
+    history_us: int,
+    future_us: int,
+    camera_history_us: int = 300_000,
+) -> tuple[int, int]:
+    egomotion = avdi.get_clip_feature(
+        clip_id,
+        avdi.features.LABELS.EGOMOTION,
+        maybe_stream=maybe_stream,
+    )
+    t_min_us, t_max_us = egomotion.time_range
+    t_min_us = int(t_min_us)
+    t_max_us = int(t_max_us)
+
+    for camera_feature in _get_training_camera_features(avdi):
+        camera = avdi.get_clip_feature(clip_id, camera_feature, maybe_stream=maybe_stream)
+        camera_min_us, camera_max_us = camera.time_range
+        t_min_us = max(t_min_us, int(camera_min_us) + camera_history_us - history_us)
+        t_max_us = min(t_max_us, int(camera_max_us) + future_us)
+
+    return t_min_us, t_max_us
+
+
 def resolve_clip_samples(
     cfg: DictConfig,
     epoch: int = 0,
@@ -177,16 +212,13 @@ def resolve_clip_samples(
 
     samples: list[tuple[str, int]] = []
     for clip_id in resolve_clip_ids(cfg, epoch=0, avdi=avdi):
-        egomotion = avdi.get_clip_feature(
-            clip_id,
-            avdi.features.LABELS.EGOMOTION,
-            maybe_stream=maybe_stream,
+        t_min_us, t_max_us = _resolve_sample_time_range(
+            avdi, clip_id, maybe_stream, history_us, future_us
         )
-        t_min_us, t_max_us = egomotion.time_range
         samples.extend(
             (clip_id, t0_us)
             for t0_us in _sample_t0s_from_time_range(
-                int(t_min_us), int(t_max_us), history_us, future_us, step_us
+                t_min_us, t_max_us, history_us, future_us, step_us
             )
         )
 
