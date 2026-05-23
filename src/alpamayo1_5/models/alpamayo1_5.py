@@ -163,6 +163,7 @@ class Alpamayo1_5(ReasoningVLA):
         n_diffusion_tokens: int,
         b_star: int,
         device: torch.device,
+        dtype: torch.dtype = torch.float32,
         prefix_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build position IDs and 4D attention mask for the expert denoiser.
@@ -191,7 +192,7 @@ class Alpamayo1_5(ReasoningVLA):
         # [b_star, H, Q, KV] — mask the gap between offset and diffusion tokens
         attention_mask = torch.zeros(
             (b_star, 1, n_diffusion_tokens, kv_cache_seq_len + n_diffusion_tokens),
-            dtype=torch.float32,
+            dtype=dtype,
             device=device,
         )
         for i in range(b_star):
@@ -317,6 +318,7 @@ class Alpamayo1_5(ReasoningVLA):
             n_diffusion_tokens=n_diffusion_tokens,
             b_star=b_star,
             device=device,
+            dtype=next(self.action_in_proj.parameters()).dtype,
             prefix_mask=prefix_mask,
         )
 
@@ -510,6 +512,7 @@ class Alpamayo1_5(ReasoningVLA):
             n_diffusion_tokens=n_diffusion_tokens,
             b_star=b_star,
             device=device,
+            dtype=next(self.action_in_proj.parameters()).dtype,
             prefix_mask=prefix_mask,
         )
 
@@ -593,6 +596,7 @@ class Alpamayo1_5(ReasoningVLA):
             n_diffusion_tokens=n_diffusion_tokens,
             b_star=b_star,
             device=device,
+            dtype=next(self.action_in_proj.parameters()).dtype,
             prefix_mask=unguided_prefix_mask_repeated,
         )
 

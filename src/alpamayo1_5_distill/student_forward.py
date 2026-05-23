@@ -221,6 +221,7 @@ def student_forward(
         n_diffusion_tokens=n_diffusion_tokens,
         b_star=b_star,
         device=device,
+        dtype=next(student.action_in_proj.parameters()).dtype,
         prefix_mask=prefix_mask,
     )
 
