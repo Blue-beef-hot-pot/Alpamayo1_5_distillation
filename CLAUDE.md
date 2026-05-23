@@ -64,6 +64,8 @@ pytest
 ### Student (Alpamayo1_5_Distilled, ~4B)
 - VLM: Qwen3-VL-2B (24 layers, hidden=1536) → same reasoning pipeline
 - Expert: derived from 2B VLM text_config (same 24 layers, hidden=1536) → 4-step flow matching
+- Action space: same 64-waypoint unicycle acceleration/curvature space, with
+  `PerWaypointActionInProjV2` input projection and linear output projection
 - KV Cache dimensions match naturally (Expert inherits from VLM text_config)
 
 ### Key: No logic overrides needed

@@ -108,6 +108,11 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
         "num_inference_steps": cfg.student.get("diffusion_steps", 4),
         "int_method": "euler",
     }
+    action_space_cfg = {
+        "_target_": "alpamayo1_5.action_space.unicycle_accel_curvature.UnicycleAccelCurvatureActionSpace",
+        "n_waypoints": 64,
+        "dt": 0.1,
+    }
     action_in_proj_cfg = {
         "_target_": "alpamayo1_5.models.action_in_proj.PerWaypointActionInProjV2",
         "num_enc_layers": 4,
@@ -115,10 +120,15 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
         "num_fourier_feats": 20,
         "max_freq": 100.0,
     }
+    action_out_proj_cfg = {
+        "_target_": "torch.nn.Linear",
+    }
     return Alpamayo1_5_DistilledConfig(
         vlm_name_or_path=cfg.student.vlm_name_or_path,
         diffusion_cfg=diffusion_cfg,
+        action_space_cfg=action_space_cfg,
         action_in_proj_cfg=action_in_proj_cfg,
+        action_out_proj_cfg=action_out_proj_cfg,
         teacher_model_name=cfg.teacher.model_name,
         distill_loss_weights={
             "vlm_logits": cfg.loss.vlm_logits_weight,

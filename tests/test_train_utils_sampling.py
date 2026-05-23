@@ -3,8 +3,13 @@
 import numpy as np
 from omegaconf import OmegaConf
 
+from alpamayo1_5.models.base_model import ReasoningVLAConfig
 from alpamayo1_5_distill import train_utils
-from alpamayo1_5_distill.train_utils import _sample_t0s_from_time_range, resolve_clip_samples
+from alpamayo1_5_distill.train_utils import (
+    _sample_t0s_from_time_range,
+    build_student_config,
+    resolve_clip_samples,
+)
 
 
 class _FakeEgomotion:
@@ -67,6 +72,26 @@ def _cfg() -> OmegaConf:
             }
         }
     )
+
+
+def test_build_student_config_sets_required_fields(monkeypatch) -> None:
+    monkeypatch.setattr(ReasoningVLAConfig, "_initialize_vlm_config", lambda self: None)
+    cfg = OmegaConf.create(
+        {
+            "student": {"vlm_name_or_path": "Qwen/Qwen3-VL-2B-Instruct"},
+            "teacher": {"model_name": "nvidia/Alpamayo-1.5-10B"},
+            "loss": {
+                "vlm_logits_weight": 1.0,
+                "expert_hidden_weight": 0.5,
+                "trajectory_l2_weight": 1.0,
+            },
+        }
+    )
+
+    student_cfg = build_student_config(cfg)
+
+    assert student_cfg.action_space_cfg is not None
+    assert student_cfg.action_out_proj_cfg is not None
 
 
 def test_sample_t0s_from_time_range_returns_inclusive_1s_steps() -> None:
