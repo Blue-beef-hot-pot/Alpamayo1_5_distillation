@@ -123,12 +123,18 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
     action_out_proj_cfg = {
         "_target_": "torch.nn.Linear",
     }
+    traj_tokenizer_cfg = {
+        "_target_": "alpamayo1_5.models.delta_tokenizer.DeltaTrajectoryTokenizer",
+        "num_bins": 768,
+    }
     return Alpamayo1_5_DistilledConfig(
         vlm_name_or_path=cfg.student.vlm_name_or_path,
         diffusion_cfg=diffusion_cfg,
         action_space_cfg=action_space_cfg,
         action_in_proj_cfg=action_in_proj_cfg,
         action_out_proj_cfg=action_out_proj_cfg,
+        traj_tokenizer_cfg=traj_tokenizer_cfg,
+        hist_traj_tokenizer_cfg=traj_tokenizer_cfg.copy(),
         teacher_model_name=cfg.teacher.model_name,
         distill_loss_weights={
             "vlm_logits": cfg.loss.vlm_logits_weight,

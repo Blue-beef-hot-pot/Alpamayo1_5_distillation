@@ -66,6 +66,8 @@ pytest
 - Expert: derived from 2B VLM text_config (same 24 layers, hidden=1536) → 4-step flow matching
 - Action space: same 64-waypoint unicycle acceleration/curvature space, with
   `PerWaypointActionInProjV2` input projection and linear output projection
+- Trajectory tokenizer: `DeltaTrajectoryTokenizer` with `num_bins` matched to
+  `traj_vocab_size` for history/future trajectory token fusion
 - KV Cache dimensions match naturally (Expert inherits from VLM text_config)
 
 ### Key: No logic overrides needed

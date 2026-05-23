@@ -94,6 +94,18 @@ def test_build_student_config_sets_required_fields(monkeypatch) -> None:
 
     assert student_cfg.action_space_cfg is not None
     assert student_cfg.action_out_proj_cfg is not None
+    assert student_cfg.traj_tokenizer_cfg is not None
+    assert student_cfg.hist_traj_tokenizer_cfg is not None
+    assert (
+        student_cfg.traj_tokenizer_cfg["_target_"]
+        == "alpamayo1_5.models.delta_tokenizer.DeltaTrajectoryTokenizer"
+    )
+    assert (
+        student_cfg.hist_traj_tokenizer_cfg["_target_"]
+        == "alpamayo1_5.models.delta_tokenizer.DeltaTrajectoryTokenizer"
+    )
+    assert student_cfg.traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
+    assert student_cfg.hist_traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
 
 
 def test_sample_t0s_from_time_range_returns_inclusive_1s_steps() -> None:
