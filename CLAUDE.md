@@ -37,6 +37,10 @@ python scripts/train_distill.py --config-name=distill data.cache_dir=./.cache/
 # Pipeline-parallel distillation (spawn one process per GPU by default, local cache)
 python scripts/train_distill_pipeline.py --config-name=distill_pipeline data.cache_dir=./.cache/
 
+# Resume training from a full checkpoint
+python scripts/train_distill.py --config-name=distill data.cache_dir=./.cache/ training.resume_from_checkpoint=outputs/distilled/epoch_5
+python scripts/train_distill_pipeline.py --config-name=distill_pipeline data.cache_dir=./.cache/ training.resume_from_checkpoint=outputs/distilled_pipeline/epoch_5
+
 # Evaluate student
 python scripts/eval_student.py --config-name=eval
 
@@ -82,6 +86,7 @@ pytest
 
 **Student (distillation package):**
 - `src/alpamayo1_5_distill/config.py` — Alpamayo1_5_DistilledConfig (2B defaults, 4-step FM)
+- `src/alpamayo1_5_distill/checkpoint.py` — training_state.pt save/load helpers for complete resume
 - `src/alpamayo1_5_distill/model.py` — Alpamayo1_5_Distilled (subclass, AutoModel registered)
 - `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with VLM hidden states + Expert hidden states across all diffusion steps
 - `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM) and inference modes
@@ -114,6 +119,10 @@ pytest
 - `data.cache_dir: ./path` — read only from local HF cache with `maybe_stream=False`; when `clip_ids` is null it auto-detects all downloaded chunks and uses all cached clips.
 
 Training samples are `(clip_id, t0_us)` pairs. Each clip is sampled every `data.sample_step_us` microseconds (default 1s) inside the valid egomotion window, aligned to the 0.1s data grid, leaving `data.history_us` (1.5s) before `t0_us` and `data.future_us` (6.4s) after it. Shuffle uses `data.seed + epoch` and applies at sample level.
+
+## Resume Training
+
+Both `train_distill.py` and `train_distill_pipeline.py` support `training.resume_from_checkpoint`. Full checkpoints contain student weights, tokenizer, `training_state.pt`, `training_progress.json`, distill loss state, optimizer, scheduler, saved epoch, global step, and best loss. Pipeline teacher ranks read `training_progress.json` to resume epoch iteration without loading optimizer state. Resume starts at the next epoch after the saved checkpoint; mid-epoch batches are not resumed.
 
 ## Flash Attention Fallback
 

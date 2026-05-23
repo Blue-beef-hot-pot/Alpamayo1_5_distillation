@@ -163,6 +163,24 @@ python scripts/train_distill.py --config-name=distill \
   teacher.num_traj_samples=6
 ```
 
+Resume from an epoch/best/final checkpoint:
+
+```bash
+python scripts/train_distill.py --config-name=distill \
+  data.cache_dir=./.cache/ \
+  training.resume_from_checkpoint=outputs/distilled/epoch_5
+
+python scripts/train_distill_pipeline.py --config-name=distill_pipeline \
+  data.cache_dir=./.cache/ \
+  training.resume_from_checkpoint=outputs/distilled_pipeline/epoch_5
+```
+
+Resume restores student weights, distillation loss state, optimizer, scheduler,
+epoch, global step, and best loss. Checkpoints also write `training_progress.json`
+so pipeline teacher ranks can resume epoch iteration without loading optimizer
+state. Resume starts from the next epoch after the saved checkpoint; mid-epoch
+batches are not resumed.
+
 When `data.cache_dir` is set, the dataloader reads from the local HF cache
 (using `download_dataset_1tb.py` output) with `maybe_stream=False` and
 auto-detects all downloaded clips. Training samples are `(clip_id, t0_us)` pairs:

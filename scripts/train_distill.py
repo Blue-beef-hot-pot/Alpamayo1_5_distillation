@@ -11,7 +11,6 @@ Or with overrides:
 """
 
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -22,7 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpamayo1_5 import helper
-from alpamayo1_5_distill.config import Alpamayo1_5_DistilledConfig
+from alpamayo1_5_distill.checkpoint import load_training_state, save_training_checkpoint
 from alpamayo1_5_distill.distill_loss import DistillationLoss
 from alpamayo1_5_distill.model import Alpamayo1_5_Distilled
 from alpamayo1_5_distill.student_forward import student_forward
@@ -56,8 +55,13 @@ def main(cfg: DictConfig) -> None:
     logger.info("Teacher model loaded: %s", cfg.teacher.model_name)
 
     # 2) Build student
-    student_config = build_student_config(cfg)
-    student = Alpamayo1_5_Distilled(student_config).to(device)
+    resume_path = cfg.training.get("resume_from_checkpoint")
+    if resume_path:
+        student = Alpamayo1_5_Distilled.from_pretrained(resume_path).to(device)
+        logger.info("Student loaded from checkpoint: %s", resume_path)
+    else:
+        student_config = build_student_config(cfg)
+        student = Alpamayo1_5_Distilled(student_config).to(device)
     total_params = sum(p.numel() for p in student.parameters())
     trainable_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
     logger.info(
@@ -102,11 +106,29 @@ def main(cfg: DictConfig) -> None:
     scheduler = hydra.utils.instantiate(scheduler_cfg, optimizer=optimizer)
 
     # 5) Training loop
+    start_epoch = 0
     global_step = 0
     best_loss = float("inf")
+    if resume_path:
+        start_epoch, global_step, best_loss = load_training_state(
+            resume_path,
+            distill_loss=distill_loss,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+        )
+        logger.info(
+            "Resumed training from %s at epoch %d, global_step %d, best_loss %.4f",
+            resume_path,
+            start_epoch,
+            global_step,
+            best_loss,
+        )
     optimizer.zero_grad()
 
-    for epoch in range(cfg.training.num_epochs):
+    last_epoch = start_epoch - 1
+    for epoch in range(start_epoch, cfg.training.num_epochs):
+        last_epoch = epoch
         student.train()
         distill_loss.train()
         epoch_loss = 0.0
@@ -184,23 +206,44 @@ def main(cfg: DictConfig) -> None:
 
         # Save checkpoint
         if (epoch + 1) % cfg.training.save_every_n_epochs == 0:
-            ckpt_path = output_dir / f"epoch_{epoch + 1}"
-            student.save_pretrained(str(ckpt_path))
-            student.tokenizer.save_pretrained(str(ckpt_path))
-            logger.info("Checkpoint saved: %s", ckpt_path)
+            save_training_checkpoint(
+                output_dir / f"epoch_{epoch + 1}",
+                student=student,
+                distill_loss=distill_loss,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                global_step=global_step,
+                best_loss=best_loss,
+            )
+            logger.info("Checkpoint saved: %s", output_dir / f"epoch_{epoch + 1}")
 
         if avg_loss < best_loss:
             best_loss = avg_loss
-            best_path = output_dir / "best"
-            student.save_pretrained(str(best_path))
-            student.tokenizer.save_pretrained(str(best_path))
-            logger.info("New best model saved: %s", best_path)
+            save_training_checkpoint(
+                output_dir / "best",
+                student=student,
+                distill_loss=distill_loss,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                global_step=global_step,
+                best_loss=best_loss,
+            )
+            logger.info("New best model saved")
 
     # Save final model
-    final_path = output_dir / "final"
-    student.save_pretrained(str(final_path))
-    student.tokenizer.save_pretrained(str(final_path))
-    logger.info("Final model saved: %s", final_path)
+    save_training_checkpoint(
+        output_dir / "final",
+        student=student,
+        distill_loss=distill_loss,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=last_epoch,
+        global_step=global_step,
+        best_loss=best_loss,
+    )
+    logger.info("Final model saved")
 
 
 if __name__ == "__main__":

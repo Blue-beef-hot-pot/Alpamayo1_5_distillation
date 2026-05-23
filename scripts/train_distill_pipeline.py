@@ -29,6 +29,11 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpamayo1_5 import helper
+from alpamayo1_5_distill.checkpoint import (
+    load_training_state,
+    read_checkpoint_progress,
+    save_training_checkpoint,
+)
 from alpamayo1_5_distill.comm import recv_teacher_bundle, send_termination, send_teacher_bundle
 from alpamayo1_5_distill.distill_loss import DistillationLoss
 from alpamayo1_5_distill.distributed import (
@@ -90,8 +95,13 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
     num_student_ranks = len(student_ranks)
     grad_accum = cfg.training.gradient_accumulation_steps
     avdi = _build_avdi(cfg.data.get("cache_dir"), cfg.data.get("revision"))
+    resume_path = cfg.training.get("resume_from_checkpoint")
+    start_epoch = 0
+    if resume_path:
+        start_epoch, _, _ = read_checkpoint_progress(resume_path)
+        logger.info("[Teacher] Resuming from epoch %d", start_epoch)
 
-    for epoch in range(cfg.training.num_epochs):
+    for epoch in range(start_epoch, cfg.training.num_epochs):
         samples = resolve_clip_samples(cfg, epoch=epoch, avdi=avdi)
         n_samples = len(samples)
 
@@ -151,8 +161,13 @@ def run_student_loop(
     device = f"cuda:{rank}"
 
     # Build student
-    student_config = build_student_config(cfg)
-    student = Alpamayo1_5_Distilled(student_config).to(device)
+    resume_path = cfg.training.get("resume_from_checkpoint")
+    if resume_path:
+        student = Alpamayo1_5_Distilled.from_pretrained(resume_path).to(device)
+        logger.info("[Rank %d] Student loaded from checkpoint: %s", rank, resume_path)
+    else:
+        student_config = build_student_config(cfg)
+        student = Alpamayo1_5_Distilled(student_config).to(device)
     total_params = sum(p.numel() for p in student.parameters())
     logger.info("[Rank %d] Student created: %s params", rank, f"{total_params:,}")
 
@@ -206,12 +221,31 @@ def run_student_loop(
     scheduler = hydra.utils.instantiate(scheduler_cfg, optimizer=optimizer)
 
     # Training loop
+    start_epoch = 0
     global_step = 0
     best_loss = float("inf")
+    if resume_path:
+        start_epoch, global_step, best_loss = load_training_state(
+            resume_path,
+            distill_loss=ddp_model.module.distill_loss,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+        )
+        logger.info(
+            "[Rank %d] Resumed training from %s at epoch %d, global_step %d, best_loss %.4f",
+            rank,
+            resume_path,
+            start_epoch,
+            global_step,
+            best_loss,
+        )
     output_dir = Path(cfg.training.output_dir)
     save_rank = student_ranks[0]
 
-    for epoch in range(cfg.training.num_epochs):
+    last_epoch = start_epoch - 1
+    for epoch in range(start_epoch, cfg.training.num_epochs):
+        last_epoch = epoch
         ddp_model.train()
         epoch_loss = 0.0
         num_batches = 0
@@ -269,18 +303,40 @@ def run_student_loop(
         # Checkpoint (only save_rank)
         if rank == save_rank:
             if (epoch + 1) % cfg.training.save_every_n_epochs == 0:
-                _save_checkpoint(ddp_model, optimizer, scheduler, epoch, global_step, output_dir)
+                _save_checkpoint(
+                    ddp_model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    global_step,
+                    best_loss,
+                    output_dir / f"epoch_{epoch + 1}",
+                )
 
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 _save_checkpoint(
-                    ddp_model, optimizer, scheduler, epoch, global_step, output_dir / "best"
+                    ddp_model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    global_step,
+                    best_loss,
+                    output_dir / "best",
                 )
                 logger.info("[Rank %d] New best model saved", rank)
 
     # Save final model
     if rank == save_rank:
-        _save_checkpoint(ddp_model, optimizer, scheduler, epoch, global_step, output_dir / "final")
+        _save_checkpoint(
+            ddp_model,
+            optimizer,
+            scheduler,
+            last_epoch,
+            global_step,
+            best_loss,
+            output_dir / "final",
+        )
         logger.info("[Rank %d] Final model saved", rank)
 
 
@@ -290,22 +346,19 @@ def _save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     epoch: int,
     global_step: int,
+    best_loss: float,
     output_dir: Path,
 ) -> None:
-    """Save student model + distill_loss + optimizer + scheduler state."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    student = ddp_model.module.student
-    student.save_pretrained(str(output_dir))
-    student.tokenizer.save_pretrained(str(output_dir))
-    torch.save(
-        {
-            "distill_loss_state": ddp_model.module.distill_loss.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
-            "epoch": epoch,
-            "global_step": global_step,
-        },
-        output_dir / "training_state.pt",
+    """Save a checkpoint from the wrapped student/loss module."""
+    save_training_checkpoint(
+        output_dir,
+        student=ddp_model.module.student,
+        distill_loss=ddp_model.module.distill_loss,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=epoch,
+        global_step=global_step,
+        best_loss=best_loss,
     )
     logger.info("Checkpoint saved: %s", output_dir)
 
