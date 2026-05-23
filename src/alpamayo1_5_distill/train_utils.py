@@ -170,6 +170,17 @@ def _sample_t0s_from_time_range(
     return list(range(t0_start, t0_end + 1, step_us))
 
 
+def _get_feature_time_range(feature: Any) -> tuple[int, int]:
+    if hasattr(feature, "time_range"):
+        t_min_us, t_max_us = feature.time_range
+        return int(t_min_us), int(t_max_us)
+
+    timestamps = getattr(feature, "timestamps", None)
+    if timestamps is None:
+        raise AttributeError(f"{type(feature).__name__} must expose time_range or timestamps")
+    return int(timestamps.min()), int(timestamps.max())
+
+
 def _resolve_sample_time_range(
     avdi: physical_ai_av.PhysicalAIAVDatasetInterface,
     clip_id: str,
@@ -183,15 +194,13 @@ def _resolve_sample_time_range(
         avdi.features.LABELS.EGOMOTION,
         maybe_stream=maybe_stream,
     )
-    t_min_us, t_max_us = egomotion.time_range
-    t_min_us = int(t_min_us)
-    t_max_us = int(t_max_us)
+    t_min_us, t_max_us = _get_feature_time_range(egomotion)
 
     for camera_feature in _get_training_camera_features(avdi):
         camera = avdi.get_clip_feature(clip_id, camera_feature, maybe_stream=maybe_stream)
-        camera_min_us, camera_max_us = camera.time_range
-        t_min_us = max(t_min_us, int(camera_min_us) + camera_history_us - history_us)
-        t_max_us = min(t_max_us, int(camera_max_us) + future_us)
+        camera_min_us, camera_max_us = _get_feature_time_range(camera)
+        t_min_us = max(t_min_us, camera_min_us + camera_history_us - history_us)
+        t_max_us = min(t_max_us, camera_max_us + future_us)
 
     return t_min_us, t_max_us
 

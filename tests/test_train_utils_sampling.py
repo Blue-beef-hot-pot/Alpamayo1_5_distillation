@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 from omegaconf import OmegaConf
 
 from alpamayo1_5_distill import train_utils
@@ -13,7 +14,7 @@ class _FakeEgomotion:
 
 class _FakeCamera:
     def __init__(self, t_min: int, t_max: int) -> None:
-        self.time_range = (t_min, t_max)
+        self.timestamps = np.array([t_min, t_max], dtype=np.int64)
 
 
 class _FakeFeatures:
