@@ -40,10 +40,11 @@ from alpamayo1_5_distill.distributed import (
 from alpamayo1_5_distill.model import Alpamayo1_5_Distilled
 from alpamayo1_5_distill.teacher import load_teacher, teacher_forward
 from alpamayo1_5_distill.train_utils import (
-    build_dataloader,
+    _build_avdi,
     build_student_config,
+    load_clip_sample,
     prepare_model_inputs,
-    resolve_clip_ids,
+    resolve_clip_samples,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,24 +89,26 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
     processor = helper.get_processor(teacher.tokenizer)
     num_student_ranks = len(student_ranks)
     grad_accum = cfg.training.gradient_accumulation_steps
+    avdi = _build_avdi(cfg.data.get("cache_dir"), cfg.data.get("revision"))
 
     for epoch in range(cfg.training.num_epochs):
-        clips = list(build_dataloader(cfg, epoch=epoch))
-        n_clips = len(clips)
+        samples = resolve_clip_samples(cfg, epoch=epoch, avdi=avdi)
+        n_samples = len(samples)
 
         # Pad to multiple of num_student_ranks * grad_accum so each student
         # rank gets exactly grad_accum micro-batches per optimizer step
         window = num_student_ranks * grad_accum
-        if n_clips % window != 0:
-            pad_count = window - (n_clips % window)
-            clips = clips + clips[:pad_count]
+        if n_samples % window != 0:
+            pad_count = window - (n_samples % window)
+            samples = samples + samples[:pad_count]
 
         logger.info(
-            "[Teacher] Epoch %d: %d clips (padded to %d)", epoch, n_clips, len(clips)
+            "[Teacher] Epoch %d: %d samples (padded to %d)", epoch, n_samples, len(samples)
         )
 
-        for i, data in enumerate(clips):
+        for i, (clip_id, t0_us) in enumerate(samples):
             target_rank = student_ranks[i % num_student_ranks]
+            data = load_clip_sample(cfg, avdi, clip_id, t0_us)
             model_inputs = prepare_model_inputs(data, processor, device)
 
             with torch.no_grad():
@@ -124,7 +127,7 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
             del teacher_out, data
 
             if i % 10 == 0:
-                logger.info("[Teacher] Epoch %d: sent clip %d to rank %d", epoch, i, target_rank)
+                logger.info("[Teacher] Epoch %d: sent sample %d to rank %d", epoch, i, target_rank)
 
         # Send termination signal to all student ranks
         for student_rank in student_ranks:
@@ -181,21 +184,21 @@ def run_student_loop(
     all_params = list(ddp_model.parameters())
     optimizer = hydra.utils.instantiate(cfg.optimizer, params=all_params)
 
-    num_clips_per_epoch = len(resolve_clip_ids(cfg, epoch=0))
+    num_samples_per_epoch = len(resolve_clip_samples(cfg, epoch=0))
     grad_accum = cfg.training.gradient_accumulation_steps
     num_student_ranks = len(student_ranks)
 
-    # Pad clip count same as teacher does
+    # Pad sample count same as teacher does
     window = num_student_ranks * grad_accum
-    n_clips = num_clips_per_epoch
-    if n_clips % window != 0:
-        n_clips += window - (n_clips % window)
+    n_samples = num_samples_per_epoch
+    if n_samples % window != 0:
+        n_samples += window - (n_samples % window)
 
-    clips_per_rank_per_epoch = n_clips // num_student_ranks
-    total_optimizer_steps = (clips_per_rank_per_epoch * cfg.training.num_epochs) // grad_accum
+    samples_per_rank_per_epoch = n_samples // num_student_ranks
+    total_optimizer_steps = (samples_per_rank_per_epoch * cfg.training.num_epochs) // grad_accum
     logger.info(
-        "[Rank %d] Clips/rank/epoch: %d, total optimizer steps: %d",
-        rank, clips_per_rank_per_epoch, total_optimizer_steps,
+        "[Rank %d] Samples/rank/epoch: %d, total optimizer steps: %d",
+        rank, samples_per_rank_per_epoch, total_optimizer_steps,
     )
 
     scheduler_cfg = OmegaConf.to_container(cfg.lr_scheduler, resolve=True)

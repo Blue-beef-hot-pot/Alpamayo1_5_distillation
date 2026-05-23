@@ -86,7 +86,7 @@ pytest
 - `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with VLM hidden states + Expert hidden states across all diffusion steps
 - `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM) and inference modes
 - `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU, `_uniform_index_mapping`
-- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config, resolve_clip_ids, build_dataloader (local cache + shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
+- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config, resolve_clip_ids/resolve_clip_samples, build_dataloader (local cache + sample-level shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
 - `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv)
 - `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management
 
@@ -113,7 +113,7 @@ pytest
 - `data.cache_dir: null` — stream from HuggingFace Hub with `maybe_stream=True` and the legacy single-clip fallback when `clip_ids` is null.
 - `data.cache_dir: ./path` — read only from local HF cache with `maybe_stream=False`; when `clip_ids` is null it auto-detects all downloaded chunks and uses all cached clips.
 
-Training configs include `data.revision`, `data.shuffle`, and `data.seed`. Shuffle uses `seed + epoch` so each epoch changes order while remaining reproducible.
+Training samples are `(clip_id, t0_us)` pairs. Each clip is sampled every `data.sample_step_us` microseconds (default 1s) inside the valid egomotion window, aligned to the 0.1s data grid, leaving `data.history_us` (1.5s) before `t0_us` and `data.future_us` (6.4s) after it. Shuffle uses `data.seed + epoch` and applies at sample level.
 
 ## Flash Attention Fallback
 

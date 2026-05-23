@@ -31,7 +31,7 @@ from alpamayo1_5_distill.train_utils import (
     build_dataloader,
     build_student_config,
     prepare_model_inputs,
-    resolve_clip_ids,
+    resolve_clip_samples,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,13 +86,13 @@ def main(cfg: DictConfig) -> None:
     optimizer = hydra.utils.instantiate(cfg.optimizer, params=all_params)
 
     # Estimate total optimizer steps for LR scheduler
-    num_batches_per_epoch = len(resolve_clip_ids(cfg, epoch=0))
+    num_samples_per_epoch = len(resolve_clip_samples(cfg, epoch=0))
     total_optimizer_steps = (
-        num_batches_per_epoch * cfg.training.num_epochs
+        num_samples_per_epoch * cfg.training.num_epochs
     ) // cfg.training.gradient_accumulation_steps
     logger.info(
-        "Batches/epoch: %d, total optimizer steps: %d",
-        num_batches_per_epoch,
+        "Samples/epoch: %d, total optimizer steps: %d",
+        num_samples_per_epoch,
         total_optimizer_steps,
     )
 

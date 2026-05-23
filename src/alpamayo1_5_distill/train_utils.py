@@ -72,13 +72,22 @@ def _build_avdi(
 
 
 def _get_cached_clip_ids(avdi: physical_ai_av.PhysicalAIAVDatasetInterface) -> list[str]:
-    """Return list of clip_ids whose egomotion chunk is present in local cache."""
+    """Return clip_ids whose required training feature chunks are present in local cache."""
     valid = avdi.clip_index[avdi.clip_index["clip_is_valid"]]
     downloaded_chunks: set[int] = set()
+    required_feature_roots = [
+        "labels/egomotion/egomotion",
+        "camera/camera_cross_left_120fov/camera_cross_left_120fov",
+        "camera/camera_front_wide_120fov/camera_front_wide_120fov",
+        "camera/camera_cross_right_120fov/camera_cross_right_120fov",
+        "camera/camera_front_tele_30fov/camera_front_tele_30fov",
+    ]
     for chunk_idx in sorted(valid["chunk"].unique()):
         chunk_idx = int(chunk_idx)
-        fname = f"labels/egomotion/egomotion.chunk_{chunk_idx:04d}.zip"
-        if avdi.is_file_cached(fname):
+        if all(
+            avdi.is_file_cached(f"{feature_root}.chunk_{chunk_idx:04d}.zip")
+            for feature_root in required_feature_roots
+        ):
             downloaded_chunks.add(chunk_idx)
     return valid[valid["chunk"].isin(downloaded_chunks)].index.tolist()
 
@@ -111,37 +120,105 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
     )
 
 
-def resolve_clip_ids(cfg: DictConfig, epoch: int = 0) -> list[str]:
-    """Resolve clip IDs for one epoch without loading clip tensors."""
+def resolve_clip_ids(
+    cfg: DictConfig,
+    epoch: int = 0,
+    avdi: physical_ai_av.PhysicalAIAVDatasetInterface | None = None,
+) -> list[str]:
+    """Resolve clip IDs without loading clip tensors."""
     cache_dir = cfg.data.get("cache_dir")
     clip_ids = cfg.data.get("clip_ids")
     if not clip_ids:
         if cache_dir is not None:
-            avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
+            if avdi is None:
+                avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
             clip_ids = _get_cached_clip_ids(avdi)
             if not clip_ids:
                 raise RuntimeError(f"No clips found in cache_dir={cache_dir}")
         else:
             clip_ids = ["030c760c-ae38-49aa-9ad8-f5650a545d26"]
+    return list(clip_ids)
 
-    clip_ids = list(clip_ids)
+
+def _ceil_to_grid_us(value_us: int, grid_us: int) -> int:
+    return ((value_us + grid_us - 1) // grid_us) * grid_us
+
+
+def _sample_t0s_from_time_range(
+    t_min_us: int,
+    t_max_us: int,
+    history_us: int,
+    future_us: int,
+    step_us: int,
+    grid_us: int = 100_000,
+) -> list[int]:
+    """Sample valid t0 timestamps from a clip time range."""
+    min_t0_us = history_us + 2 * grid_us
+    t0_start = _ceil_to_grid_us(max(t_min_us + history_us, min_t0_us), grid_us)
+    t0_end = t_max_us - future_us
+    if t0_start > t0_end:
+        return []
+    return list(range(t0_start, t0_end + 1, step_us))
+
+
+def resolve_clip_samples(
+    cfg: DictConfig,
+    epoch: int = 0,
+    avdi: physical_ai_av.PhysicalAIAVDatasetInterface | None = None,
+) -> list[tuple[str, int]]:
+    """Resolve (clip_id, t0_us) samples for one epoch."""
+    cache_dir = cfg.data.get("cache_dir")
+    if avdi is None:
+        avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
+    maybe_stream = cache_dir is None
+    history_us = cfg.data.get("history_us", 1_500_000)
+    future_us = cfg.data.get("future_us", 6_400_000)
+    step_us = cfg.data.get("sample_step_us", 1_000_000)
+
+    samples: list[tuple[str, int]] = []
+    for clip_id in resolve_clip_ids(cfg, epoch=0, avdi=avdi):
+        egomotion = avdi.get_clip_feature(
+            clip_id,
+            avdi.features.LABELS.EGOMOTION,
+            maybe_stream=maybe_stream,
+        )
+        t_min_us, t_max_us = egomotion.time_range
+        samples.extend(
+            (clip_id, t0_us)
+            for t0_us in _sample_t0s_from_time_range(
+                int(t_min_us), int(t_max_us), history_us, future_us, step_us
+            )
+        )
+
     if cfg.data.get("shuffle", True):
         seed = cfg.data.get("seed", 42)
         rng = random.Random(seed + epoch)
-        rng.shuffle(clip_ids)
-    return clip_ids
+        rng.shuffle(samples)
+    return samples
+
+
+def load_clip_sample(
+    cfg: DictConfig,
+    avdi: physical_ai_av.PhysicalAIAVDatasetInterface,
+    clip_id: str,
+    t0_us: int,
+) -> dict[str, Any]:
+    """Load one (clip_id, t0_us) sample."""
+    cache_dir = cfg.data.get("cache_dir")
+    return load_physical_aiavdataset(
+        clip_id,
+        avdi=avdi,
+        maybe_stream=cache_dir is None,
+        t0_us=t0_us,
+    )
 
 
 def build_dataloader(cfg: DictConfig, epoch: int = 0):
     """Yield clip data dicts for training, loading from local cache when available."""
     cache_dir = cfg.data.get("cache_dir")
     avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
-    clip_ids = resolve_clip_ids(cfg, epoch=epoch)
-    maybe_stream = cache_dir is None
-    for clip_id in clip_ids:
-        yield load_physical_aiavdataset(
-            clip_id, avdi=avdi, maybe_stream=maybe_stream, t0_us=5_100_000
-        )
+    for clip_id, t0_us in resolve_clip_samples(cfg, epoch=epoch, avdi=avdi):
+        yield load_clip_sample(cfg, avdi, clip_id, t0_us)
 
 
 def prepare_model_inputs(data: dict, processor, device: str) -> dict:

@@ -38,6 +38,9 @@ data:
   cache_dir: null       # Local HF cache dir; null = stream from HF Hub
   revision: "b719eea7f0a63619ef51ec7f54178af0937ef050"
   clip_ids: null        # null + cache_dir set = auto-detect all downloaded clips
+  sample_step_us: 1000000
+  history_us: 1500000
+  future_us: 6400000
   shuffle: true
   seed: 42
 
