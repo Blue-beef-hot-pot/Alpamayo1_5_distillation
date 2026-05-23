@@ -69,6 +69,7 @@ class BaseDiffusion(ABC, nn.Module):
         step_fn: StepFn,
         unguided_step_fn: StepFn | None = None,
         device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype | None = None,
         return_all_steps: bool = False,
         *args,
         **kwargs,

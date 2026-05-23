@@ -56,6 +56,7 @@ class FlowMatching(BaseDiffusion):
         step_fn: StepFn,
         unguided_step_fn: StepFn | None = None,
         device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype | None = None,
         return_all_steps: bool = False,
         inference_step: int | None = None,
         int_method: Literal["euler"] | None = None,
@@ -102,6 +103,7 @@ class FlowMatching(BaseDiffusion):
                 step_fn=step_fn,
                 unguided_step_fn=unguided_step_fn,
                 device=device,
+                dtype=dtype,
                 return_all_steps=return_all_steps,
                 inference_step=inference_step,
                 inference_guidance_weight=inference_guidance_weight,
@@ -141,6 +143,7 @@ class FlowMatching(BaseDiffusion):
         step_fn: StepFn,
         unguided_step_fn: StepFn | None = None,
         device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype | None = None,
         return_all_steps: bool = False,
         inference_step: int | None = None,
         inference_guidance_weight: float | None = None,
@@ -168,8 +171,8 @@ class FlowMatching(BaseDiffusion):
                 The final sampled tensor [B, *x_dims] if return_all_steps is False,
                 otherwise a tuple of all sampled tensors [B, T, *x_dims] and the time steps [T].
         """
-        x = torch.randn(batch_size, *self.x_dims, device=device) * temperature
-        time_steps = torch.linspace(0.0, 1.0, inference_step + 1, device=device)
+        x = torch.randn(batch_size, *self.x_dims, device=device, dtype=dtype) * temperature
+        time_steps = torch.linspace(0.0, 1.0, inference_step + 1, device=device, dtype=dtype)
         n_dim = len(self.x_dims)
         if return_all_steps:
             all_steps = [x]

@@ -321,6 +321,7 @@ def teacher_forward(
         batch_size=total_batch,
         step_fn=step_fn,
         device=device,
+        dtype=next(teacher.action_in_proj.parameters()).dtype,
         return_all_steps=False,
     )
 

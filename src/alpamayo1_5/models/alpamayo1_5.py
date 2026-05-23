@@ -365,6 +365,7 @@ class Alpamayo1_5(ReasoningVLA):
             batch_size=total_batch,
             step_fn=step_fn,
             device=device,
+            dtype=next(self.action_in_proj.parameters()).dtype,
             return_all_steps=False,
             **diffusion_kwargs,
         )
@@ -655,6 +656,7 @@ class Alpamayo1_5(ReasoningVLA):
                 position_ids=unguided_position_ids,
             ),
             device=device,
+            dtype=next(self.action_in_proj.parameters()).dtype,
             return_all_steps=False,
             **diffusion_kwargs,
         )
