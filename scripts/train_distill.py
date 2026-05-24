@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpamayo1_5 import helper
 from alpamayo1_5_distill.checkpoint import load_training_state, save_training_checkpoint
+from alpamayo1_5_distill.distributed import freeze_student_visual_tower
 from alpamayo1_5_distill.distill_loss import DistillationLoss
 from alpamayo1_5_distill.model import Alpamayo1_5_Distilled
 from alpamayo1_5_distill.student_forward import student_forward
@@ -62,6 +63,7 @@ def main(cfg: DictConfig) -> None:
     else:
         student_config = build_student_config(cfg)
         student = Alpamayo1_5_Distilled(student_config).to(device)
+    freeze_student_visual_tower(student)
     total_params = sum(p.numel() for p in student.parameters())
     trainable_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
     logger.info(

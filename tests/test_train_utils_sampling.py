@@ -19,6 +19,7 @@ from alpamayo1_5_distill.train_utils import (
 )
 
 student_forward_module = importlib.import_module("alpamayo1_5_distill.student_forward")
+distributed_module = importlib.import_module("alpamayo1_5_distill.distributed")
 _pipeline_spec = importlib.util.spec_from_file_location(
     "train_distill_pipeline", Path(__file__).parents[1] / "scripts" / "train_distill_pipeline.py"
 )
@@ -87,6 +88,24 @@ def _cfg() -> OmegaConf:
             }
         }
     )
+
+
+class _FakeVisualStudent(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.vlm = torch.nn.Module()
+        self.vlm.model = torch.nn.Module()
+        self.vlm.model.visual = torch.nn.Linear(2, 2)
+        self.vlm.model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
+
+
+def test_freeze_student_visual_tower_only_freezes_visual_params() -> None:
+    student = _FakeVisualStudent()
+
+    distributed_module.freeze_student_visual_tower(student)
+
+    assert not any(p.requires_grad for p in student.vlm.model.visual.parameters())
+    assert all(p.requires_grad for p in student.vlm.model.layers.parameters())
 
 
 def test_build_student_config_sets_required_fields(monkeypatch) -> None:

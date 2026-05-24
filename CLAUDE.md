@@ -69,6 +69,7 @@ pytest
 - Trajectory tokenizer: `DeltaTrajectoryTokenizer` with `num_bins` matched to
   `traj_vocab_size` (default 4096 for teacher trajectory-token compatibility) for history/future trajectory token fusion
 - KV Cache dimensions match naturally (Expert inherits from VLM text_config)
+- Student training freezes the Qwen visual tower to avoid retaining repeated visual-tower gradients during teacher-forcing
 
 ### Key: No logic overrides needed
 `Alpamayo1_5_Distilled` inherits from `Alpamayo1_5` without overriding any methods because the parent class is fully dimension-agnostic — Expert is created via `copy.deepcopy(self.vlm.config.text_config)`, so switching to 2B VLM automatically makes the Expert 2B.
@@ -97,7 +98,7 @@ pytest
 - `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU, `_uniform_index_mapping`
 - `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config (including full Alpamayo special tokens), resolve_clip_ids/resolve_clip_samples, build_dataloader (local cache + sample-level shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
 - `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv)
-- `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management
+- `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management, student visual-tower freezing
 
 **Configs:**
 - `configs/distill.yaml` — Single-GPU training config (teacher, student, loss weights, optimizer, scheduler)

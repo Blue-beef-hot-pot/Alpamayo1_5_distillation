@@ -123,6 +123,13 @@ def create_student_group(student_ranks: list[int]) -> dist.ProcessGroup | None:
     return group if rank in student_ranks else None
 
 
+def freeze_student_visual_tower(student: Alpamayo1_5_Distilled) -> None:
+    visual = student.vlm.model.visual
+    visual.eval()
+    for param in visual.parameters():
+        param.requires_grad_(False)
+
+
 def wrap_student_ddp(
     student: Alpamayo1_5_Distilled,
     distill_loss: DistillationLoss,
@@ -146,6 +153,7 @@ def wrap_student_ddp(
     Returns:
         DDP-wrapped StudentWithLoss.
     """
+    freeze_student_visual_tower(student)
     model = StudentWithLoss(
         student,
         distill_loss,

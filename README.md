@@ -64,6 +64,8 @@ Current lightweight choices:
 - Full Alpamayo special-token set and a 4096-token trajectory vocabulary are
   added to the student tokenizer so teacher sequences can be teacher-forced after
   ID alignment.
+- Student training freezes the Qwen visual tower; teacher-forcing still trains
+  text/expert components while avoiding repeated visual-tower gradient memory.
 
 This is structural downsizing, not pruning, quantization, or LoRA.
 
