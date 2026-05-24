@@ -61,6 +61,8 @@ Current lightweight choices:
 - Flow Matching: `num_inference_steps=4`.
 - Action input projection: `PerWaypointActionInProjV2` with 4 encoder layers and
   hidden size 1024.
+- Full Alpamayo special-token set is added to the student tokenizer so teacher
+  sequences can be teacher-forced after ID alignment.
 
 This is structural downsizing, not pruning, quantization, or LoRA.
 
@@ -74,11 +76,13 @@ Training uses an online teacher-student path:
 4. Run the teacher autoregressively to collect generated sequences, VLM logits,
    VLM hidden states, Expert hidden states across all diffusion steps, and
    sampled action trajectories.
-5. Feed the teacher-generated token sequences through the student VLM with
+5. Align teacher-added trajectory/special token IDs to the student tokenizer and
+   validate Qwen visual patch counts before student teacher-forcing.
+6. Feed the teacher-generated token sequences through the student VLM with
    gradients enabled (teacher-forcing), collecting VLM hidden states.
-6. Run the student Expert diffusion denoising path using the resulting KV cache,
+7. Run the student Expert diffusion denoising path using the resulting KV cache,
    collecting Expert hidden states at every diffusion step.
-7. Optimize the weighted sum of:
+8. Optimize the weighted sum of:
    - VLM logits KL distillation
    - Expert hidden-state MSE across all diffusion steps, with layer mapping
      (36→24) and step mapping (10→4), grouped learnable projections and
@@ -195,7 +199,9 @@ by default (`data.shuffle=true`, `data.seed=42`) and applies at sample level.
 
 The pipeline-parallel mode uses `torch.multiprocessing.spawn`: one configured
 teacher rank runs teacher inference and round-robin dispatches results to all
-other ranks, which run student training with DDP gradient synchronization. By
+other ranks, which run student training with DDP gradient synchronization. Before
+dispatch, teacher-added trajectory/special token IDs are remapped to the student
+tokenizer so teacher-forcing cannot feed out-of-range IDs to the student VLM. By
 default `pipeline.num_processes=null` uses `torch.cuda.device_count()`, so the
 number of students is `num_processes - 1`.
 

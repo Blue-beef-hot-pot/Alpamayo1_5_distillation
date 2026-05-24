@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+import importlib.util
+from pathlib import Path
+
 import numpy as np
+import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -12,6 +17,14 @@ from alpamayo1_5_distill.train_utils import (
     repeat_visual_inputs,
     resolve_clip_samples,
 )
+
+student_forward_module = importlib.import_module("alpamayo1_5_distill.student_forward")
+_pipeline_spec = importlib.util.spec_from_file_location(
+    "train_distill_pipeline", Path(__file__).parents[1] / "scripts" / "train_distill_pipeline.py"
+)
+train_distill_pipeline = importlib.util.module_from_spec(_pipeline_spec)
+assert _pipeline_spec.loader is not None
+_pipeline_spec.loader.exec_module(train_distill_pipeline)
 
 
 class _FakeEgomotion:
@@ -108,6 +121,25 @@ def test_build_student_config_sets_required_fields(monkeypatch) -> None:
     assert student_cfg.hist_traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
 
 
+def test_build_student_config_adds_full_alpamayo_special_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(ReasoningVLAConfig, "_initialize_vlm_config", lambda self: None)
+    cfg = OmegaConf.create(
+        {
+            "student": {"vlm_name_or_path": "Qwen/Qwen3-VL-2B-Instruct"},
+            "teacher": {"model_name": "nvidia/Alpamayo-1.5-10B"},
+            "loss": {
+                "vlm_logits_weight": 1.0,
+                "expert_hidden_weight": 0.5,
+                "trajectory_l2_weight": 1.0,
+            },
+        }
+    )
+
+    student_cfg = build_student_config(cfg)
+
+    assert student_cfg.add_special_tokens is True
+
+
 def test_sample_t0s_from_time_range_returns_inclusive_1s_steps() -> None:
     assert _sample_t0s_from_time_range(
         t_min_us=0,
@@ -190,6 +222,72 @@ def test_repeat_visual_inputs_repeats_list_pixel_values_preserving_per_image_ord
         pixels[1].tolist(),
         pixels[1].tolist(),
     ]
+
+
+class _FakeTokenizer:
+    def __init__(self, id_to_token: dict[int, str], token_to_id: dict[str, int]) -> None:
+        self.id_to_token = id_to_token
+        self.token_to_id = token_to_id
+
+    def convert_ids_to_tokens(self, token_id: int) -> str:
+        return self.id_to_token[token_id]
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return self.token_to_id[token]
+
+
+class _FakeEmbeddings:
+    num_embeddings = 100
+
+
+class _FakeVlm:
+    def get_input_embeddings(self):
+        return _FakeEmbeddings()
+
+
+class _FakeStudent:
+    tokenizer = _FakeTokenizer(
+        id_to_token={},
+        token_to_id={"<i0>": 50, "<|traj_future_start|>": 80},
+    )
+    vlm = _FakeVlm()
+
+
+class _FakeTeacher:
+    tokenizer = _FakeTokenizer(
+        id_to_token={120: "<i0>", 130: "<|traj_future_start|>"},
+        token_to_id={},
+    )
+
+
+def test_align_teacher_sequences_remaps_teacher_added_tokens_to_student_ids() -> None:
+    sequences = torch.tensor([[10, 120, 130]])
+
+    aligned = student_forward_module._align_teacher_sequences_to_student(
+        sequences, _FakeStudent(), _FakeTeacher()
+    )
+
+    assert aligned.tolist() == [[10, 50, 80]]
+
+
+def test_align_teacher_output_sequences_for_student_before_dispatch() -> None:
+    teacher_dict = {"sequences": torch.tensor([[10, 120, 130]])}
+
+    train_distill_pipeline._align_teacher_output_for_student(
+        teacher_dict, _FakeStudent(), _FakeTeacher()
+    )
+
+    assert teacher_dict["sequences"].tolist() == [[10, 50, 80]]
+
+
+def test_validate_qwen_visual_inputs_rejects_mismatched_patch_counts() -> None:
+    with pytest.raises(ValueError, match="pixel_values has 5 patches but image_grid_thw describes 6"):
+        student_forward_module._validate_qwen_visual_inputs(
+            {
+                "pixel_values": torch.zeros(5, 3, 2, 14, 14),
+                "image_grid_thw": torch.tensor([[1, 2, 3]]),
+            }
+        )
 
 
 def test_resolve_clip_samples_shuffles_samples_by_epoch(monkeypatch) -> None:

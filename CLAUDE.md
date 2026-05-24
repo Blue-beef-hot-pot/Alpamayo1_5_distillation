@@ -93,9 +93,9 @@ pytest
 - `src/alpamayo1_5_distill/checkpoint.py` — training_state.pt save/load helpers for complete resume
 - `src/alpamayo1_5_distill/model.py` — Alpamayo1_5_Distilled (subclass, AutoModel registered)
 - `src/alpamayo1_5_distill/teacher.py` — load_teacher(), teacher_forward() with VLM hidden states + Expert hidden states across all diffusion steps
-- `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM) and inference modes
+- `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM), inference modes, teacher/student token ID alignment, and Qwen visual patch-count validation
 - `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU, `_uniform_index_mapping`
-- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config, resolve_clip_ids/resolve_clip_samples, build_dataloader (local cache + sample-level shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
+- `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config (including full Alpamayo special tokens), resolve_clip_ids/resolve_clip_samples, build_dataloader (local cache + sample-level shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
 - `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv)
 - `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management
 
@@ -114,7 +114,7 @@ pytest
 
 ## Pipeline Parallelism
 
-`train_distill_pipeline.py` uses `torch.multiprocessing.spawn` instead of `torchrun`. `pipeline.num_processes: null` means use `torch.cuda.device_count()`; students are all ranks except `pipeline.teacher_rank`.
+`train_distill_pipeline.py` uses `torch.multiprocessing.spawn` instead of `torchrun`. `pipeline.num_processes: null` means use `torch.cuda.device_count()`; students are all ranks except `pipeline.teacher_rank`. The teacher rank remaps teacher-added trajectory/special token IDs to the student tokenizer before dispatching sequences to student ranks.
 
 ## Data Loading
 

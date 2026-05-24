@@ -43,6 +43,7 @@ from alpamayo1_5_distill.distributed import (
     wrap_student_ddp,
 )
 from alpamayo1_5_distill.model import Alpamayo1_5_Distilled
+from alpamayo1_5_distill.student_forward import _align_teacher_sequences_to_student
 from alpamayo1_5_distill.teacher import load_teacher, teacher_forward
 from alpamayo1_5_distill.train_utils import (
     _build_avdi,
@@ -76,6 +77,12 @@ def infer_student_ranks(world_size: int, teacher_rank: int) -> list[int]:
     return [rank for rank in range(world_size) if rank != teacher_rank]
 
 
+def _align_teacher_output_for_student(teacher_dict: dict, student_config, teacher) -> None:
+    teacher_dict["sequences"] = _align_teacher_sequences_to_student(
+        teacher_dict["sequences"], student_config, teacher
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rank 0: Teacher orchestrator
 # ---------------------------------------------------------------------------
@@ -90,6 +97,7 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
         dtype=getattr(torch, cfg.teacher.dtype),
     )
     logger.info("[Teacher] Teacher model loaded: %s", cfg.teacher.model_name)
+    student_config_for_token_alignment = build_student_config(cfg)
 
     processor = helper.get_processor(teacher.tokenizer)
     num_student_ranks = len(student_ranks)
@@ -133,6 +141,11 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
                     collect_vlm_hiddens=cfg.loss.vlm_hidden_weight > 0,
                 )
 
+            teacher_dict = {"sequences": teacher_out.sequences}
+            _align_teacher_output_for_student(
+                teacher_dict, student_config_for_token_alignment, teacher
+            )
+            teacher_out.sequences = teacher_dict["sequences"]
             send_teacher_bundle(model_inputs, teacher_out, dst=target_rank)
             del teacher_out, data
 

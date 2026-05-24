@@ -25,6 +25,62 @@ from alpamayo1_5_distill.train_utils import repeat_visual_inputs, shallow_copy_d
 logger = logging.getLogger(__name__)
 
 
+def _validate_qwen_visual_inputs(visual_kwargs: dict[str, Any]) -> None:
+    pixel_values = visual_kwargs.get("pixel_values")
+    image_grid_thw = visual_kwargs.get("image_grid_thw")
+    if not isinstance(pixel_values, torch.Tensor) or not isinstance(image_grid_thw, torch.Tensor):
+        return
+
+    expected_patches = int(image_grid_thw.prod(dim=1).sum().item())
+    actual_patches = pixel_values.shape[0]
+    if actual_patches != expected_patches:
+        raise ValueError(
+            f"pixel_values has {actual_patches} patches but image_grid_thw describes "
+            f"{expected_patches} patches"
+        )
+
+
+def _get_student_vocab_limit(student: Any) -> int:
+    if hasattr(student, "vlm"):
+        return student.vlm.get_input_embeddings().num_embeddings - 1
+    return int(student.vocab_size) - 1
+
+
+def _get_student_tokenizer(student: Any) -> Any:
+    if hasattr(student, "tokenizer"):
+        return student.tokenizer
+    if not hasattr(student, "_token_alignment_tokenizer"):
+        student._token_alignment_tokenizer = student._build_processor().tokenizer
+    return student._token_alignment_tokenizer
+
+
+def _align_teacher_sequences_to_student(
+    sequences: torch.Tensor, student: Any, teacher: Alpamayo1_5 | None = None
+) -> torch.Tensor:
+    max_student_token_id = _get_student_vocab_limit(student)
+    if sequences.numel() == 0 or int(sequences.max().item()) <= max_student_token_id:
+        return sequences
+    if teacher is None:
+        raise ValueError(
+            f"teacher_sequences contains token id {int(sequences.max().item())}, but student "
+            f"embedding only supports ids <= {max_student_token_id}"
+        )
+
+    aligned = sequences.clone()
+    student_tokenizer = _get_student_tokenizer(student)
+    overflow_ids = torch.unique(sequences[sequences > max_student_token_id]).tolist()
+    for token_id in overflow_ids:
+        token = teacher.tokenizer.convert_ids_to_tokens(int(token_id))
+        student_token_id = student_tokenizer.convert_tokens_to_ids(token)
+        if student_token_id is None or student_token_id > max_student_token_id:
+            raise ValueError(
+                f"teacher token {token!r} id {int(token_id)} cannot be mapped into the "
+                f"student vocabulary"
+            )
+        aligned[sequences == int(token_id)] = int(student_token_id)
+    return aligned
+
+
 class StudentOutput:
     """Container for student model outputs used in distillation."""
 
@@ -53,6 +109,7 @@ def student_forward(
     student: Alpamayo1_5,
     data: dict[str, Any],
     teacher_sequences: torch.Tensor | None = None,
+    teacher: Alpamayo1_5 | None = None,
     top_p: float = 0.98,
     temperature: float = 0.6,
     num_traj_samples: int = 6,
@@ -75,6 +132,7 @@ def student_forward(
         teacher_sequences: Teacher-generated token IDs ``[B*, total_len]``
             for teacher-forcing.  If *None*, the student generates its own
             tokens (inference / eval mode).
+        teacher: Optional teacher model used to map teacher-added token IDs to student IDs.
         top_p: Top-p sampling parameter (inference mode only).
         temperature: Sampling temperature (inference mode only).
         num_traj_samples: Number of trajectory samples.
@@ -120,12 +178,13 @@ def student_forward(
 
     if teacher_sequences is not None:
         # Teacher-forcing mode: differentiable VLM forward
-        sequences = teacher_sequences.to(device)
+        sequences = _align_teacher_sequences_to_student(teacher_sequences.to(device), student, teacher)
         b_star = sequences.shape[0]
 
         full_attention_mask = (sequences != pad_token_id).long()
 
         visual_kwargs = repeat_visual_inputs(tokenized_data, B, num_traj_samples)
+        _validate_qwen_visual_inputs(visual_kwargs)
 
         # Forward with gradient — VLM Logits KD and VLM Hidden KD can backprop
         vlm_out = student.vlm(

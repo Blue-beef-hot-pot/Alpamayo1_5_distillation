@@ -142,6 +142,7 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
             "trajectory_l2": cfg.loss.trajectory_l2_weight,
         },
         attn_implementation=cfg.student.get("attn_implementation", "flash_attention_2"),
+        add_special_tokens=True,
     )
 
 

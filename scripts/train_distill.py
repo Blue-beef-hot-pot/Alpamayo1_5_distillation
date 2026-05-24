@@ -160,6 +160,7 @@ def main(cfg: DictConfig) -> None:
                     student,
                     model_inputs,
                     teacher_sequences=teacher_out.sequences,
+                    teacher=teacher,
                     num_traj_samples=cfg.teacher.num_traj_samples,
                     collect_vlm_logits=cfg.loss.vlm_logits_weight > 0,
                     collect_expert_hiddens=cfg.loss.expert_hidden_weight > 0,
