@@ -76,23 +76,24 @@ Training uses an online teacher-student path:
 1. Load the teacher model `nvidia/Alpamayo-1.5-10B` in eval mode.
 2. Load the student model from `Alpamayo1_5_DistilledConfig`.
 3. Build image/text inputs and fuse trajectory history tokens.
-4. Run the teacher autoregressively to collect generated sequences, VLM logits,
-   VLM hidden states, Expert hidden states across all diffusion steps, and
-   sampled action trajectories.
+4. Run the teacher autoregressively to collect generated sequences, Expert
+   hidden states across all diffusion steps, and sampled action trajectories.
 5. Align teacher-added trajectory/special token IDs to the student tokenizer and
    validate Qwen visual patch counts before student teacher-forcing.
-6. Feed the teacher-generated token sequences through the student VLM with
-   gradients enabled (teacher-forcing), collecting VLM hidden states.
+6. Feed the teacher-generated token sequence through the student VLM with
+   gradients enabled to build the Expert KV cache.
 7. Run the student Expert diffusion denoising path using the resulting KV cache,
    collecting Expert hidden states at every diffusion step.
 8. Optimize the weighted sum of:
-   - VLM logits KL distillation
    - Expert hidden-state MSE across all diffusion steps, with layer mapping
      (36→24) and step mapping (10→4), grouped learnable projections and
      margin ReLU
-   - VLM hidden-state MSE, with layer mapping and grouped projections + margin
-     ReLU
    - sampled action trajectory L2 loss
+
+Pipeline-parallel training defaults to this minimal stable Expert/trajectory
+loss set (`teacher.num_traj_samples=1`, VLM logits/hidden KD disabled) to keep
+Qwen3-VL teacher-forcing within GPU memory. Single-GPU configs can still enable
+VLM logits KD and VLM hidden KD for smaller experiments.
 
 ## Setup
 
@@ -204,7 +205,9 @@ The pipeline-parallel mode uses `torch.multiprocessing.spawn`: one configured
 teacher rank runs teacher inference and round-robin dispatches results to all
 other ranks, which run student training with DDP gradient synchronization. Before
 dispatch, teacher-added trajectory/special token IDs are remapped to the student
-tokenizer so teacher-forcing cannot feed out-of-range IDs to the student VLM. By
+tokenizer so teacher-forcing cannot feed out-of-range IDs to the student VLM. The
+default pipeline config uses one trajectory sample and disables VLM logits/hidden
+KD so the run prioritizes stable Expert Hidden KD + Trajectory L2 training. By
 default `pipeline.num_processes=null` uses `torch.cuda.device_count()`, so the
 number of students is `num_processes - 1`.
 

@@ -108,6 +108,16 @@ def test_freeze_student_visual_tower_only_freezes_visual_params() -> None:
     assert all(p.requires_grad for p in student.vlm.model.layers.parameters())
 
 
+def test_pipeline_config_uses_minimal_stable_losses() -> None:
+    cfg = OmegaConf.load(Path(__file__).parents[1] / "configs" / "distill_pipeline.yaml")
+
+    assert cfg.teacher.num_traj_samples == 1
+    assert cfg.loss.vlm_logits_weight == 0.0
+    assert cfg.loss.vlm_hidden_weight == 0.0
+    assert cfg.loss.expert_hidden_weight > 0
+    assert cfg.loss.trajectory_l2_weight > 0
+
+
 def test_build_student_config_sets_required_fields(monkeypatch) -> None:
     monkeypatch.setattr(ReasoningVLAConfig, "_initialize_vlm_config", lambda self: None)
     cfg = OmegaConf.create(

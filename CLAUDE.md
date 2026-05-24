@@ -75,10 +75,10 @@ pytest
 `Alpamayo1_5_Distilled` inherits from `Alpamayo1_5` without overriding any methods because the parent class is fully dimension-agnostic — Expert is created via `copy.deepcopy(self.vlm.config.text_config)`, so switching to 2B VLM automatically makes the Expert 2B.
 
 ### Distillation losses
-1. **VLM Logits KD** — KL divergence between teacher/student VLM output distributions
-2. **Expert Hidden KD** — MSE between teacher/student Expert hidden states across all diffusion steps (layer mapping: 36→24 via uniform sampling; step mapping: 10→4 via uniform sampling). Uses grouped learnable projections (3 groups: shallow/mid/deep) with margin ReLU (Heo et al., ICCV 2019) to suppress weak teacher activations.
-3. **VLM Hidden KD** — MSE between teacher/student VLM per-layer hidden states. Same grouped projection + margin ReLU scheme as Expert Hidden KD.
-4. **Trajectory L2** — MSE between predicted trajectories
+1. **Expert Hidden KD** — MSE between teacher/student Expert hidden states across all diffusion steps (layer mapping: 36→24 via uniform sampling; step mapping: 10→4 via uniform sampling). Uses grouped learnable projections (3 groups: shallow/mid/deep) with margin ReLU (Heo et al., ICCV 2019) to suppress weak teacher activations.
+2. **Trajectory L2** — MSE between predicted trajectories
+3. **VLM Logits KD** — optional KL divergence between teacher/student VLM output distributions; disabled by default in pipeline config for memory stability
+4. **VLM Hidden KD** — optional MSE between teacher/student VLM per-layer hidden states; disabled by default in pipeline config for memory stability
 
 ## Key Files
 
@@ -115,7 +115,7 @@ pytest
 
 ## Pipeline Parallelism
 
-`train_distill_pipeline.py` uses `torch.multiprocessing.spawn` instead of `torchrun`. `pipeline.num_processes: null` means use `torch.cuda.device_count()`; students are all ranks except `pipeline.teacher_rank`. The teacher rank remaps teacher-added trajectory/special token IDs to the student tokenizer before dispatching sequences to student ranks.
+`train_distill_pipeline.py` uses `torch.multiprocessing.spawn` instead of `torchrun`. `pipeline.num_processes: null` means use `torch.cuda.device_count()`; students are all ranks except `pipeline.teacher_rank`. The teacher rank remaps teacher-added trajectory/special token IDs to the student tokenizer before dispatching sequences to student ranks. The default pipeline config uses `teacher.num_traj_samples: 1` and disables VLM logits/hidden KD so the run prioritizes stable Expert Hidden KD + Trajectory L2 training.
 
 ## Data Loading
 

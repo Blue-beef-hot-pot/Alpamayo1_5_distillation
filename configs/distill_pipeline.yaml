@@ -12,7 +12,7 @@ teacher:
   dtype: bfloat16
   top_p: 0.98
   temperature: 0.6
-  num_traj_samples: 6
+  num_traj_samples: 1
   max_generation_length: 256
   collect_expert_hiddens: true
 
@@ -22,9 +22,9 @@ student:
   dtype: bfloat16
 
 loss:
-  vlm_logits_weight: 1.0
+  vlm_logits_weight: 0.0
   expert_hidden_weight: 0.5
-  vlm_hidden_weight: 0.5
+  vlm_hidden_weight: 0.0
   trajectory_l2_weight: 1.0
   temperature: 2.0
 
