@@ -84,8 +84,9 @@ Training uses an online teacher-student path:
    validate Qwen visual patch counts before student teacher-forcing.
 6. Feed the teacher-generated token sequence through the student VLM with
    gradients enabled to build the Expert KV cache.
-7. Run the student Expert diffusion denoising path using the resulting KV cache,
-   collecting Expert hidden states at every diffusion step.
+7. Run the student Expert diffusion denoising path using the resulting KV cache
+   through a distillation-only differentiable Flow Matching sampler, collecting
+   Expert hidden states at every diffusion step.
 8. Optimize the weighted sum of:
    - Expert hidden-state MSE across all diffusion steps, with layer mapping
      (36→24) and step mapping (10→4), grouped learnable projections and

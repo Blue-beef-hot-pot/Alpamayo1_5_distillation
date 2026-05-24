@@ -25,6 +25,39 @@ from alpamayo1_5_distill.train_utils import repeat_visual_inputs, shallow_copy_d
 logger = logging.getLogger(__name__)
 
 
+def differentiable_flow_matching_sample(
+    diffusion: Any,
+    batch_size: int,
+    step_fn: Any,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+    return_all_steps: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    x = torch.randn(batch_size, *diffusion.x_dims, device=device, dtype=dtype)
+    time_steps = torch.linspace(
+        0.0,
+        1.0,
+        diffusion.num_inference_steps + 1,
+        device=device,
+        dtype=dtype,
+    )
+    n_dim = len(diffusion.x_dims)
+    if return_all_steps:
+        all_steps = [x]
+
+    for i in range(diffusion.num_inference_steps):
+        dt = time_steps[i + 1] - time_steps[i]
+        dt = dt.view(1, *[1] * n_dim).expand(batch_size, *[1] * n_dim)
+        t_start = time_steps[i].view(1, *[1] * n_dim).expand(batch_size, *[1] * n_dim)
+        x = x + dt * step_fn(x=x, t=t_start)
+        if return_all_steps:
+            all_steps.append(x)
+
+    if return_all_steps:
+        return torch.stack(all_steps, dim=1), time_steps
+    return x
+
+
 def _validate_qwen_visual_inputs(visual_kwargs: dict[str, Any]) -> None:
     pixel_values = visual_kwargs.get("pixel_values")
     image_grid_thw = visual_kwargs.get("image_grid_thw")
@@ -328,7 +361,8 @@ def student_forward(
         return pred
 
     total_batch = B * num_traj_samples
-    sampled_action = student.diffusion.sample(
+    sampled_action = differentiable_flow_matching_sample(
+        student.diffusion,
         batch_size=total_batch,
         step_fn=step_fn,
         device=device,
