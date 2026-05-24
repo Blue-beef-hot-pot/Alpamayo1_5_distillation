@@ -119,6 +119,7 @@ def test_build_student_config_sets_required_fields(monkeypatch) -> None:
     )
     assert student_cfg.traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
     assert student_cfg.hist_traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
+    assert student_cfg.traj_vocab_size > 3000
 
 
 def test_build_student_config_adds_full_alpamayo_special_tokens(monkeypatch) -> None:
@@ -268,6 +269,31 @@ def test_align_teacher_sequences_remaps_teacher_added_tokens_to_student_ids() ->
     )
 
     assert aligned.tolist() == [[10, 50, 80]]
+
+
+class _FakeLargeStudent:
+    tokenizer = _FakeTokenizer(
+        id_to_token={},
+        token_to_id={"<i3000>": 90},
+    )
+    vlm = _FakeVlm()
+
+
+class _FakeLargeTeacher:
+    tokenizer = _FakeTokenizer(
+        id_to_token={154669: "<i3000>"},
+        token_to_id={},
+    )
+
+
+def test_align_teacher_sequences_remaps_large_teacher_trajectory_token() -> None:
+    sequences = torch.tensor([[10, 154669]])
+
+    aligned = student_forward_module._align_teacher_sequences_to_student(
+        sequences, _FakeLargeStudent(), _FakeLargeTeacher()
+    )
+
+    assert aligned.tolist() == [[10, 90]]
 
 
 def test_align_teacher_output_sequences_for_student_before_dispatch() -> None:

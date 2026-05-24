@@ -61,8 +61,9 @@ Current lightweight choices:
 - Flow Matching: `num_inference_steps=4`.
 - Action input projection: `PerWaypointActionInProjV2` with 4 encoder layers and
   hidden size 1024.
-- Full Alpamayo special-token set is added to the student tokenizer so teacher
-  sequences can be teacher-forced after ID alignment.
+- Full Alpamayo special-token set and a 4096-token trajectory vocabulary are
+  added to the student tokenizer so teacher sequences can be teacher-forced after
+  ID alignment.
 
 This is structural downsizing, not pruning, quantization, or LoRA.
 

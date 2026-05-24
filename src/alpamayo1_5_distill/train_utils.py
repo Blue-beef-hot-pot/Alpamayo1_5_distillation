@@ -123,9 +123,10 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
     action_out_proj_cfg = {
         "_target_": "torch.nn.Linear",
     }
+    traj_vocab_size = cfg.student.get("traj_vocab_size", 4096)
     traj_tokenizer_cfg = {
         "_target_": "alpamayo1_5.models.delta_tokenizer.DeltaTrajectoryTokenizer",
-        "num_bins": 768,
+        "num_bins": traj_vocab_size,
     }
     return Alpamayo1_5_DistilledConfig(
         vlm_name_or_path=cfg.student.vlm_name_or_path,
@@ -133,6 +134,7 @@ def build_student_config(cfg: DictConfig) -> Alpamayo1_5_DistilledConfig:
         action_space_cfg=action_space_cfg,
         action_in_proj_cfg=action_in_proj_cfg,
         action_out_proj_cfg=action_out_proj_cfg,
+        traj_vocab_size=traj_vocab_size,
         traj_tokenizer_cfg=traj_tokenizer_cfg,
         hist_traj_tokenizer_cfg=traj_tokenizer_cfg.copy(),
         teacher_model_name=cfg.teacher.model_name,
