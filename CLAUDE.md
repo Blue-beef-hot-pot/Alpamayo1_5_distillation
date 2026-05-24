@@ -70,6 +70,7 @@ pytest
   `traj_vocab_size` (default 4096 for teacher trajectory-token compatibility) for history/future trajectory token fusion
 - KV Cache dimensions match naturally (Expert inherits from VLM text_config)
 - Student training freezes the Qwen visual tower to avoid retaining repeated visual-tower gradients during teacher-forcing
+- Student VLM attention remains configurable (Flash Attention 2 by default), while Expert attention defaults to SDPA for cached diffusion-token mask compatibility
 
 ### Key: No logic overrides needed
 `Alpamayo1_5_Distilled` inherits from `Alpamayo1_5` without overriding any methods because the parent class is fully dimension-agnostic — Expert is created via `copy.deepcopy(self.vlm.config.text_config)`, so switching to 2B VLM automatically makes the Expert 2B.
@@ -130,6 +131,8 @@ Training samples are `(clip_id, t0_us)` pairs. Each clip is sampled every `data.
 Both `train_distill.py` and `train_distill_pipeline.py` support `training.resume_from_checkpoint`. Full checkpoints contain student weights, tokenizer, `training_state.pt`, `training_progress.json`, distill loss state, optimizer, scheduler, saved epoch, global step, and best loss. Pipeline teacher ranks read `training_progress.json` to resume epoch iteration without loading optimizer state. Resume starts at the next epoch after the saved checkpoint; mid-epoch batches are not resumed.
 
 ## Flash Attention Fallback
+
+Student configs can keep `student.attn_implementation: flash_attention_2` for the VLM while setting `student.expert_attn_implementation: sdpa` for the Expert. If Flash Attention is unavailable for the VLM too, load the whole model with SDPA:
 
 ```python
 model = Alpamayo1_5_Distilled.from_pretrained("...", dtype=torch.bfloat16, attn_implementation="sdpa").to("cuda")

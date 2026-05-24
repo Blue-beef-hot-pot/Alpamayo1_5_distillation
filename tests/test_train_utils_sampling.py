@@ -149,6 +149,29 @@ def test_build_student_config_sets_required_fields(monkeypatch) -> None:
     assert student_cfg.traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
     assert student_cfg.hist_traj_tokenizer_cfg["num_bins"] == student_cfg.traj_vocab_size
     assert student_cfg.traj_vocab_size > 3000
+    assert student_cfg.expert_cfg["_attn_implementation"] == "sdpa"
+
+
+def test_build_student_config_allows_expert_attention_override(monkeypatch) -> None:
+    monkeypatch.setattr(ReasoningVLAConfig, "_initialize_vlm_config", lambda self: None)
+    cfg = OmegaConf.create(
+        {
+            "student": {
+                "vlm_name_or_path": "Qwen/Qwen3-VL-2B-Instruct",
+                "expert_attn_implementation": "eager",
+            },
+            "teacher": {"model_name": "nvidia/Alpamayo-1.5-10B"},
+            "loss": {
+                "vlm_logits_weight": 1.0,
+                "expert_hidden_weight": 0.5,
+                "trajectory_l2_weight": 1.0,
+            },
+        }
+    )
+
+    student_cfg = build_student_config(cfg)
+
+    assert student_cfg.expert_cfg["_attn_implementation"] == "eager"
 
 
 def test_build_student_config_adds_full_alpamayo_special_tokens(monkeypatch) -> None:

@@ -66,6 +66,8 @@ Current lightweight choices:
   ID alignment.
 - Student training freezes the Qwen visual tower; teacher-forcing still trains
   text/expert components while avoiding repeated visual-tower gradient memory.
+- The student VLM can use Flash Attention 2, while the Expert defaults to SDPA
+  for compatibility with cached diffusion-token attention masks.
 
 This is structural downsizing, not pruning, quantization, or LoRA.
 

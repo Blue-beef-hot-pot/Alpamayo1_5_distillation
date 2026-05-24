@@ -12,6 +12,7 @@ teacher:
 student:
   vlm_name_or_path: "Qwen/Qwen3-VL-2B-Instruct"
   attn_implementation: flash_attention_2
+  expert_attn_implementation: sdpa
   dtype: bfloat16
 
 loss:
