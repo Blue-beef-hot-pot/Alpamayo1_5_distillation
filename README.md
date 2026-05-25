@@ -39,7 +39,8 @@ and adds a student model plus teacher/student distillation utilities under
 │   ├── download_dataset_1tb.py   # Size-capped PhysicalAI AV cache downloader
 │   ├── test_downloaded_data.py   # Local dataset loading / inference smoke test
 │   ├── generate_teacher_data.py  # Prototype teacher soft-label cache script
-│   └── eval_student.py           # Prototype student trajectory evaluation
+│   ├── eval_student.py           # Prototype student trajectory evaluation
+│   └── benchmark_student.py      # Student inference latency benchmark (CoC vs skip-CoC)
 ├── src/
 │   ├── alpamayo1_5/              # Original Alpamayo 1.5 implementation
 │   └── alpamayo1_5_distill/      # Distilled student and distillation logic
@@ -245,6 +246,22 @@ python scripts/eval_student.py --config-name=eval \
 
 The current evaluation script also uses a single example clip. Treat reported
 metrics as a smoke/prototype signal until dataset iteration is implemented.
+
+## Orin Deployment Benchmark
+
+Measure student model inference latency with two modes:
+
+```bash
+# Default: one clip, 0.1s sampling step, both CoC and skip-CoC modes
+python scripts/benchmark_student.py
+python scripts/benchmark_student.py --clip-id <uuid> --sample-step-us 100000
+```
+
+- **CoC mode**: VLM autoregressive generate → KV Cache → Expert 4-step denoising
+- **Skip-CoC mode**: prompt + `<|traj_future_start|>` → VLM prefill → KV Cache → Expert
+
+The script prints per-frame latency immediately and final statistics (mean/std/min/max).
+Uses pretrained Qwen3-VL-2B VLM with random Expert weights and SDPA attention.
 
 ## Known Implementation Notes
 

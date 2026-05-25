@@ -50,6 +50,10 @@ python scripts/generate_teacher_data.py --config-name=distill
 # Test teacher inference (original code)
 python src/alpamayo1_5/test_inference.py
 
+# Benchmark student inference latency (for Orin deployment)
+python scripts/benchmark_student.py
+python scripts/benchmark_student.py --clip-id <uuid> --sample-step-us 100000
+
 pre-commit run --all-files
 pytest
 ```
@@ -105,6 +109,15 @@ pytest
 - `configs/distill.yaml` — Single-GPU training config (teacher, student, loss weights, optimizer, scheduler)
 - `configs/distill_pipeline.yaml` — Pipeline-parallel training config (spawned ranks, round-robin teacher dispatch)
 - `configs/eval.yaml` — Evaluation config
+
+**Scripts:**
+- `scripts/train_distill.py` — Single-GPU online distillation training
+- `scripts/train_distill_pipeline.py` — Pipeline-parallel distillation training (spawned multi-GPU)
+- `scripts/eval_student.py` — Student trajectory evaluation (minADE, minFDE, miss rate)
+- `scripts/generate_teacher_data.py` — Offline teacher soft-label generation
+- `scripts/benchmark_student.py` — Student inference latency benchmark (CoC vs skip-CoC modes) for Orin deployment analysis
+- `scripts/download_dataset_1tb.py` — Size-capped PhysicalAI AV cache downloader
+- `scripts/test_downloaded_data.py` — Local dataset loading / inference smoke test
 
 ## Conventions
 
