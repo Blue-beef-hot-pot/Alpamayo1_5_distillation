@@ -488,7 +488,7 @@ def main() -> None:
         print("ERROR: No valid samples found for this clip.")
         sys.exit(1)
 
-    avdi = _build_avdi(args.cache_dir, None)
+    avdi = _build_avdi(args.cache_dir, cfg.data.revision)
     processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
 
     coc_results: list[dict] = []
