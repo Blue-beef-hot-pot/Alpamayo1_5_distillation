@@ -509,6 +509,14 @@ def main() -> None:
     data = load_clip_sample(cfg, avdi, samples[0][0], samples[0][1])
     model_inputs = prepare_model_inputs(data, processor, device)
     print("Warmup (1 frame, both modes)...")
+    # ── Diagnostic: test VLM forward (not generate) ──
+    tdata = {k: v for k, v in model_inputs["tokenized_data"].items()}
+    tids = tdata.pop("input_ids")
+    with torch.autocast("cuda", dtype=dtype):
+        _test = student.vlm(input_ids=tids, use_cache=True, **tdata)
+    del _test, tdata, tids
+    print("  VLM forward OK")
+    # ── End diagnostic ──
     run_coc_inference(student, model_inputs, device, dtype)
     run_skip_coc_inference(student, model_inputs, device, dtype)
     torch.cuda.synchronize(device)
