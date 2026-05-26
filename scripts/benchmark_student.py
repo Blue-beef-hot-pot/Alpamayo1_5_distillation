@@ -462,6 +462,7 @@ def main() -> None:
     print(f"  VLM params: {vlm_m:.0f}M  Expert params: {expert_m:.0f}M  Total: {total_m:.0f}M")
     print(f"  GPU: {torch.cuda.get_device_name(device)}")
     print(f"  Diffusion: {student.diffusion.num_inference_steps}-step Euler")
+    torch.backends.cudnn.benchmark = True
 
     # ── Resolve clip samples ──
     data_cfg: dict = {
