@@ -7,6 +7,7 @@ Provides DDP setup, process group management, and StudentWithLoss wrapper
 that combines the student model and distillation loss for DDP wrapping.
 """
 
+import datetime
 import logging
 import os
 from typing import Any
@@ -98,6 +99,7 @@ def setup_distributed(
     rank: int | None = None,
     world_size: int | None = None,
     local_rank: int | None = None,
+    timeout_seconds: float = 600,
 ) -> tuple[int, int]:
     """Initialize NCCL process group and set CUDA device."""
     if rank is not None:
@@ -107,7 +109,8 @@ def setup_distributed(
     if local_rank is not None:
         os.environ["LOCAL_RANK"] = str(local_rank)
 
-    dist.init_process_group(backend="nccl")
+    timeout = datetime.timedelta(seconds=timeout_seconds)
+    dist.init_process_group(backend="nccl", timeout=timeout)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank))

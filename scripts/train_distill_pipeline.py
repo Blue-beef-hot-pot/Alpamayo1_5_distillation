@@ -432,6 +432,7 @@ def pipeline_worker(local_rank: int, world_size: int, cfg: DictConfig) -> None:
         rank=local_rank,
         world_size=world_size,
         local_rank=local_rank,
+        timeout_seconds=3600,
     )
 
     try:
