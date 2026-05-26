@@ -70,10 +70,19 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
     config = build_student_config(base_cfg)
     student = Alpamayo1_5_Distilled.from_pretrained_submodules(config)
     student = student.to(device=device, dtype=dtype)
-    # Qwen3-VL-2B visual encoder Conv3D does not support bfloat16 on some cuDNN/A100
-    # combos (CUDNN_STATUS_INTERNAL_ERROR). Keep just the Conv3D in float32.
-    student.vlm.model.visual.patch_embed.proj = (
-        student.vlm.model.visual.patch_embed.proj.to(dtype=torch.float32)
+    # Qwen3-VL-2B patch_embed Conv3D triggers CUDNN_STATUS_INTERNAL_ERROR
+    # when running entirely in bfloat16 on some cuDNN/A100 combos.
+    # Patch forward to cast input to float32 so cuDNN uses float32 kernels;
+    # cast output back to bfloat16 for the rest of the visual model.
+    _patch_embed = student.vlm.model.visual.patch_embed
+    def _patched_patch_embed_forward(self, hidden_states):
+        hidden_states = hidden_states.view(
+            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
+        )
+        hidden_states = self.proj(hidden_states.to(dtype=torch.float32)).view(-1, self.embed_dim)
+        return hidden_states.to(dtype=torch.bfloat16)
+    _patch_embed.forward = _patched_patch_embed_forward.__get__(
+        _patch_embed, type(_patch_embed),
     )
     student.eval()
     return student
@@ -483,11 +492,7 @@ def main() -> None:
         data_cfg["clip_ids"] = [args.clip_id]
     cfg = OmegaConf.create({"data": data_cfg})
     samples = resolve_clip_samples(cfg, epoch=0)
-    clip_ids = sorted({clip_id for clip_id, _ in samples})
-    print(f"  Clips: {len(clip_ids)}  Samples: {len(samples)} (step={args.sample_step_us / 1e6:.1f}s)")
-    for cid in clip_ids:
-        n = sum(1 for c, _ in samples if c == cid)
-        print(f"    {cid}: {n} samples")
+    print(f"  Samples: {len(samples)} (step={args.sample_step_us / 1e6:.1f}s)")
     print("=" * 70)
 
     if len(samples) == 0:
