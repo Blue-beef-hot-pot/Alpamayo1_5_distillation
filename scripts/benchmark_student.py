@@ -489,7 +489,7 @@ def main() -> None:
         sys.exit(1)
 
     avdi = _build_avdi(args.cache_dir, cfg.data.revision)
-    processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
+    processor = helper.get_processor(student.tokenizer)
 
     coc_results: list[dict] = []
     skip_results: list[dict] = []
