@@ -495,10 +495,10 @@ def main() -> None:
     skip_results: list[dict] = []
 
     # ── Warmup ──
+    torch.cuda.empty_cache()
     data = load_clip_sample(cfg, avdi, samples[0][0], samples[0][1])
     model_inputs = prepare_model_inputs(data, processor, device)
     print("Warmup (1 frame, both modes)...")
-    torch.backends.cudnn.enabled = False
     run_coc_inference(student, model_inputs, device, dtype)
     run_skip_coc_inference(student, model_inputs, device, dtype)
     torch.cuda.synchronize(device)
