@@ -220,3 +220,34 @@ def send_termination(dst: int, device: torch.device = torch.device("cuda")) -> N
     """Send termination signal to dst rank."""
     signal = torch.tensor([_TERMINATION_MAGIC], dtype=torch.int64).to(device)
     dist.send(signal, dst=dst)
+
+
+_LOSS_KEYS = ("total", "expert_hidden_kd", "trajectory_l2", "vlm_logits_kd", "vlm_hidden_kd")
+_NUM_LOSS_VALUES = len(_LOSS_KEYS)
+
+
+def send_loss_tensor(losses: dict[str, torch.Tensor], dst: int) -> None:
+    """Send loss scalars to dst rank via non-blocking isend."""
+    values: list[float] = []
+    for k in _LOSS_KEYS:
+        v = losses.get(k)
+        values.append(v.item() if isinstance(v, torch.Tensor) else 0.0)
+    tensor = torch.tensor(values, dtype=torch.float32).cpu()
+    dist.isend(tensor, dst=dst)
+
+
+def recv_loss_tensor(
+    src: int, device: torch.device
+) -> tuple[torch.Tensor, Any]:
+    """Start a non-blocking irecv for loss scalars from src rank.
+
+    Returns (tensor, handle). The tensor is filled when handle.is_completed().
+    """
+    tensor = torch.zeros(_NUM_LOSS_VALUES, dtype=torch.float32, device=device)
+    handle = dist.irecv(tensor, src=src)
+    return tensor, handle
+
+
+def decode_loss_tensor(tensor: torch.Tensor) -> dict[str, float]:
+    """Decode a received loss tensor into a named dict."""
+    return {key: tensor[i].item() for i, key in enumerate(_LOSS_KEYS)}

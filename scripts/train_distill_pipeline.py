@@ -24,6 +24,7 @@ import hydra
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
+from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -34,7 +35,14 @@ from alpamayo1_5_distill.checkpoint import (
     read_checkpoint_progress,
     save_training_checkpoint,
 )
-from alpamayo1_5_distill.comm import recv_teacher_bundle, send_termination, send_teacher_bundle
+from alpamayo1_5_distill.comm import (
+    decode_loss_tensor,
+    recv_loss_tensor,
+    recv_teacher_bundle,
+    send_loss_tensor,
+    send_teacher_bundle,
+    send_termination,
+)
 from alpamayo1_5_distill.distill_loss import DistillationLoss
 from alpamayo1_5_distill.distributed import (
     StudentWithLoss,
@@ -120,8 +128,19 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
             pad_count = window - (n_samples % window)
             samples = samples + samples[:pad_count]
 
-        logger.info(
-            "[Teacher] Epoch %d: %d samples (padded to %d)", epoch, n_samples, len(samples)
+        # Set up non-blocking loss recv from all student ranks
+        recv_tensors: dict[int, torch.Tensor] = {}
+        recv_handles: dict[int, object] = {}
+        latest_losses: dict[int, dict[str, float]] = {}
+        for sr in student_ranks:
+            recv_tensors[sr], recv_handles[sr] = recv_loss_tensor(sr, device)
+
+        total_epochs = cfg.training.num_epochs
+        pbar = tqdm(
+            total=len(samples),
+            desc=f"Epoch {epoch + 1}/{total_epochs}",
+            unit="sample",
+            dynamic_ncols=True,
         )
 
         for i, (clip_id, t0_us) in enumerate(samples):
@@ -149,15 +168,36 @@ def run_teacher_loop(cfg: DictConfig, rank: int, student_ranks: list[int]) -> No
             send_teacher_bundle(model_inputs, teacher_out, dst=target_rank)
             del teacher_out, data
 
-            if i % 10 == 0:
-                logger.info("[Teacher] Epoch %d: sent sample %d to rank %d", epoch, i, target_rank)
+            # Poll completed loss recvs
+            for sr in student_ranks:
+                if recv_handles[sr] is not None and recv_handles[sr].is_completed():
+                    latest_losses[sr] = decode_loss_tensor(recv_tensors[sr])
+                    recv_tensors[sr], recv_handles[sr] = recv_loss_tensor(sr, device)
+
+            # Update progress bar with latest loss averages
+            if latest_losses:
+                avg_total = sum(v["total"] for v in latest_losses.values()) / len(latest_losses)
+                avg_expert = sum(v["expert_hidden_kd"] for v in latest_losses.values()) / len(latest_losses)
+                avg_traj = sum(v["trajectory_l2"] for v in latest_losses.values()) / len(latest_losses)
+                pbar.set_postfix(
+                    total=f"{avg_total:.4f}",
+                    expert=f"{avg_expert:.4f}",
+                    traj=f"{avg_traj:.4f}",
+                )
+            pbar.update(1)
+
+        pbar.close()
 
         # Send termination signal to all student ranks
         for student_rank in student_ranks:
             send_termination(student_rank, device=torch.device(device))
 
         dist.barrier()
-        logger.info("[Teacher] Epoch %d complete", epoch)
+        if latest_losses:
+            avg_epoch_loss = sum(v["total"] for v in latest_losses.values()) / len(latest_losses)
+            logger.info("[Teacher] Epoch %d complete — avg loss: %.4f", epoch, avg_epoch_loss)
+        else:
+            logger.info("[Teacher] Epoch %d complete", epoch)
 
     logger.info("[Teacher] Training complete")
 
@@ -281,6 +321,8 @@ def run_student_loop(
                     teacher_expert_hiddens=teacher_dict["expert_hiddens_all_steps"],
                     teacher_traj=teacher_dict["sampled_traj"],
                 )
+
+            send_loss_tensor(losses, dst=teacher_rank)
 
             loss = losses["total"]
             loss_scaled = loss / grad_accum

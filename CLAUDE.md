@@ -102,7 +102,7 @@ pytest
 - `src/alpamayo1_5_distill/student_forward.py` — student_forward() with teacher-forcing (differentiable VLM), differentiable distillation-only Flow Matching sampling, inference modes, teacher/student token ID alignment, and Qwen visual patch-count validation
 - `src/alpamayo1_5_distill/distill_loss.py` — DistillationLoss (VLM Logits KD + Expert Hidden KD + VLM Hidden KD + Traj L2), grouped projections with margin ReLU, `_uniform_index_mapping`
 - `src/alpamayo1_5_distill/train_utils.py` — Shared utilities: build_student_config (including full Alpamayo special tokens), resolve_clip_ids/resolve_clip_samples, build_dataloader (local cache + sample-level shuffle), prepare_model_inputs, repeat_visual_inputs, shallow_copy_data
-- `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv)
+- `src/alpamayo1_5_distill/comm.py` — Cross-GPU serialization for pipeline parallelism (NCCL send/recv), including loss-scalar backhaul (isend/irecv) for tqdm progress bar
 - `src/alpamayo1_5_distill/distributed.py` — DDP setup, StudentWithLoss wrapper, process group management, student visual-tower freezing
 
 **Configs:**
@@ -130,6 +130,8 @@ pytest
 ## Pipeline Parallelism
 
 `train_distill_pipeline.py` uses `torch.multiprocessing.spawn` instead of `torchrun`. `pipeline.num_processes: null` means use `torch.cuda.device_count()`; students are all ranks except `pipeline.teacher_rank`. The teacher rank remaps teacher-added trajectory/special token IDs to the student tokenizer before dispatching sequences to student ranks. The default pipeline config uses `teacher.num_traj_samples: 1` and disables VLM logits/hidden KD so the run prioritizes stable Expert Hidden KD + Trajectory L2 training.
+
+**Training progress visualization (tqdm):** The teacher rank displays a `tqdm` progress bar per epoch showing dispatched samples, ETA, and real-time loss values. Student ranks send loss scalars (total, expert_hidden_kd, trajectory_l2, vlm_logits_kd, vlm_hidden_kd) back to the teacher via non-blocking NCCL `isend`. The teacher polls completed `irecv` handles between sample dispatches and updates the progress bar postfix with averaged loss values. No additional overhead on training throughput (student uses non-blocking send; teacher polls without blocking).
 
 ## Data Loading
 

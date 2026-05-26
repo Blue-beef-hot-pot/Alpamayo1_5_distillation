@@ -228,3 +228,4 @@ log/
 CLAUDE.log
 .cache/
 outputs/
+weekly_report_alpamayo_distillation.md
