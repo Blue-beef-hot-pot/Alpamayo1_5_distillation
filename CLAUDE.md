@@ -126,6 +126,7 @@ pytest
 - Config sub-dicts use Hydra `_target_` convention for `hydra.utils.instantiate`
 - Original `alpamayo1_5` package is read-only — all distillation code goes in `alpamayo1_5_distill`
 - After every code change or design discussion, update CLAUDE.md and README.md to reflect the current state
+- Git commit messages are written in Chinese
 
 ## Pipeline Parallelism
 
