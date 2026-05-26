@@ -66,9 +66,8 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
     student = Alpamayo1_5_Distilled.from_pretrained_submodules(config)
     student = student.to(device=device, dtype=dtype)
     # Qwen3-VL-2B patch_embed Conv3D triggers CUDNN_STATUS_INTERNAL_ERROR
-    # on some cuDNN/A100 combos, even with float32 weights. Disable cuDNN
-    # for this specific Conv3D op and run it in float32 to avoid both the
-    # cuDNN bug and the bfloat16 Conv3D fallback issue.
+    # when running in bfloat16 on some cuDNN/A100 combos.
+    # Workaround: run Conv3D in float32, convert output back to bfloat16.
     _pe = student.vlm.model.visual.patch_embed
     _proj = _pe.proj
     _proj.weight = torch.nn.Parameter(_proj.weight.to(dtype=torch.float32))
@@ -78,8 +77,7 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
         )
-        with torch.backends.cudnn.flags(enabled=False):
-            hidden_states = self.proj(hidden_states.to(dtype=torch.float32)).view(-1, self.embed_dim)
+        hidden_states = self.proj(hidden_states.to(dtype=torch.float32)).view(-1, self.embed_dim)
         return hidden_states.to(dtype=torch.bfloat16)
     _pe.forward = _fwd.__get__(_pe, type(_pe))
     student.eval()
@@ -132,6 +130,15 @@ def run_coc_inference(
         "ego_history_rot": data["ego_history_rot"],
     }
     input_ids = student.fuse_traj_tokens(input_ids, traj_data_fuse)
+    torch.cuda.synchronize(device)
+    # Validate token IDs are within student vocabulary bounds
+    vocab_size = student.vlm.get_input_embeddings().num_embeddings
+    max_id = int(input_ids.max().item())
+    if max_id >= vocab_size:
+        raise RuntimeError(
+            f"fuse_traj_tokens produced token ID {max_id} >= vocab_size {vocab_size}. "
+            f"Student vocabulary is too small for the fused trajectory tokens."
+        )
 
     eos_id = student.tokenizer.convert_tokens_to_ids(to_special_token("traj_future_start"))
     pad_id = student.tokenizer.pad_token_id
