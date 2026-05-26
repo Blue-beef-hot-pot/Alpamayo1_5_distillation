@@ -17,20 +17,15 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from transformers import AutoProcessor, LogitsProcessorList, StoppingCriteriaList
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alpamayo1_5 import helper
-from alpamayo1_5.models.alpamayo1_5 import ExpertLogitsProcessor
 from alpamayo1_5.models.token_utils import (
-    StopAfterEOS,
     replace_padding_after_eos,
     to_special_token,
 )
@@ -95,6 +90,31 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
 # ---------------------------------------------------------------------------
 
 
+def _top_p_sample(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+    """Sample a token with temperature scaling and top-p (nucleus) filtering."""
+    logits = logits / temperature
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+    sorted_indices_to_remove = cumulative_probs > top_p
+    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+    sorted_indices_to_remove[:, 0] = False
+    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+    logits[indices_to_remove] = float("-inf")
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
+def _extract_vlm_kwargs(tokenized_data: dict) -> dict:
+    """Extract visual/attention kwargs from tokenized data for direct VLM forward."""
+    vlm_kwargs = {}
+    for key in ("pixel_values", "image_grid_thw", "image_grid_thw_batch"):
+        if key in tokenized_data:
+            vlm_kwargs[key] = tokenized_data[key]
+    if "attention_mask" in tokenized_data:
+        vlm_kwargs["attention_mask"] = tokenized_data["attention_mask"]
+    return vlm_kwargs
+
+
 @torch.no_grad()
 def run_coc_inference(
     student: Alpamayo1_5_Distilled,
@@ -114,65 +134,76 @@ def run_coc_inference(
 
     eos_id = student.tokenizer.convert_tokens_to_ids(to_special_token("traj_future_start"))
     pad_id = student.tokenizer.pad_token_id
+    traj_token_offset = student.config.traj_token_start_idx
+    traj_vocab_size = student.config.traj_vocab_size
+    max_new_tokens = 256
+    temperature = 0.6
+    top_p = 0.98
 
-    gen_cfg = student.vlm.generation_config
-    gen_cfg.top_p = 0.98
-    gen_cfg.temperature = 0.6
-    gen_cfg.do_sample = True
-    gen_cfg.num_return_sequences = 1
-    gen_cfg.max_new_tokens = 256
-    gen_cfg.output_logits = False
-    gen_cfg.return_dict_in_generate = True
-    gen_cfg.pad_token_id = pad_id
+    vlm_kwargs = _extract_vlm_kwargs(tokenized_data)
 
-    stopping = StoppingCriteriaList([StopAfterEOS(eos_token_id=eos_id)])
-    logits_proc = LogitsProcessorList([
-        ExpertLogitsProcessor(
-            traj_token_offset=student.config.traj_token_start_idx,
-            traj_vocab_size=student.config.traj_vocab_size,
-        )
-    ])
-
-    # ── VLM generation ──
+    # ── VLM generation (manual autoregressive, bypassing generate()) ──
     vlm_start = torch.cuda.Event(enable_timing=True)
     vlm_end = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize(device)
     vlm_start.record()
 
+    # Prefill
     with torch.autocast("cuda", dtype=dtype):
-        vlm_outputs = student.vlm.generate(
-            input_ids=input_ids,
-            generation_config=gen_cfg,
-            stopping_criteria=stopping,
-            logits_processor=logits_proc,
-            **tokenized_data,
-        )
+        vlm_out = student.vlm(input_ids=input_ids, use_cache=True, **vlm_kwargs)
+
+    past_key_values = vlm_out.past_key_values
+    generated_ids: list[torch.Tensor] = []
+    eos_found = torch.zeros(B, dtype=torch.bool, device=device)
+
+    for _step in range(max_new_tokens):
+        logits = vlm_out.logits[:, -1, :].float()
+        # ExpertLogitsProcessor: mask trajectory token logits
+        logits[:, traj_token_offset : traj_token_offset + traj_vocab_size] = float("-inf")
+        next_token = _top_p_sample(logits, temperature, top_p)  # [B, 1]
+        generated_ids.append(next_token)
+
+        # StopAfterEOS: stop one step after EOS is first seen
+        eos_found = eos_found | (next_token.squeeze(-1) == eos_id)
+        if eos_found.all():
+            break
+
+        # Decode step (no visual inputs after prefill)
+        with torch.autocast("cuda", dtype=dtype):
+            vlm_out = student.vlm(
+                input_ids=next_token, past_key_values=past_key_values, use_cache=True,
+            )
 
     vlm_end.record()
     torch.cuda.synchronize(device)
     vlm_ms = vlm_start.elapsed_time(vlm_end)
-    n_generated = int((vlm_outputs.sequences[0] != pad_id).sum().item() - input_ids.shape[1])
-    del vlm_outputs.logits
-    torch.cuda.empty_cache()
+    n_generated = len(generated_ids)
 
-    # ── Build Expert inputs ──
-    vlm_outputs.rope_deltas = student.vlm.model.rope_deltas
-    vlm_outputs.sequences = replace_padding_after_eos(
-        token_ids=vlm_outputs.sequences, eos_token_id=eos_id, pad_token_id=pad_id,
+    # Build full sequences tensor
+    if generated_ids:
+        generated = torch.cat(generated_ids, dim=-1)
+        sequences = torch.cat([input_ids, generated], dim=-1)
+    else:
+        sequences = input_ids
+    sequences = replace_padding_after_eos(
+        token_ids=sequences, eos_token_id=eos_id, pad_token_id=pad_id,
     )
 
-    prompt_cache = vlm_outputs.past_key_values
+    torch.cuda.empty_cache()
+
+    # ── Expert denoising ──
+    prompt_cache = past_key_values
     prefill_seq_len = prompt_cache.get_seq_length()
-    b_star = vlm_outputs.sequences.shape[0]
+    b_star = sequences.shape[0]
     n_diff = student.action_space.get_action_space_dims()[0]
 
     offset = student._find_eos_offset(
-        sequences=vlm_outputs.sequences, eos_token_id=eos_id, device=device,
+        sequences=sequences, eos_token_id=eos_id, device=device,
     )
     prefix_mask = tokenized_data.get("attention_mask")
 
     position_ids, attn_mask = student._build_expert_pos_ids_and_attn_mask(
-        offset=offset, rope_deltas=vlm_outputs.rope_deltas,
+        offset=offset, rope_deltas=student.vlm.model.rope_deltas,
         kv_cache_seq_len=prefill_seq_len, n_diffusion_tokens=n_diff, b_star=b_star,
         device=device, dtype=next(student.action_in_proj.parameters()).dtype,
         prefix_mask=prefix_mask,
@@ -182,7 +213,6 @@ def run_coc_inference(
     if student.config.expert_non_causal_attention:
         fwd_kwargs["is_causal"] = False
 
-    # ── Expert denoising (4-step flow matching) ──
     expert_step_ms: list[float] = []
 
     def step_fn(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -509,14 +539,6 @@ def main() -> None:
     data = load_clip_sample(cfg, avdi, samples[0][0], samples[0][1])
     model_inputs = prepare_model_inputs(data, processor, device)
     print("Warmup (1 frame, both modes)...")
-    # ── Diagnostic: test VLM forward (not generate) ──
-    tdata = {k: v for k, v in model_inputs["tokenized_data"].items()}
-    tids = tdata.pop("input_ids")
-    with torch.autocast("cuda", dtype=dtype):
-        _test = student.vlm(input_ids=tids, use_cache=True, **tdata)
-    del _test, tdata, tids
-    print("  VLM forward OK")
-    # ── End diagnostic ──
     run_coc_inference(student, model_inputs, device, dtype)
     run_skip_coc_inference(student, model_inputs, device, dtype)
     torch.cuda.synchronize(device)
