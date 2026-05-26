@@ -70,6 +70,11 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
     config = build_student_config(base_cfg)
     student = Alpamayo1_5_Distilled.from_pretrained_submodules(config)
     student = student.to(device=device, dtype=dtype)
+    # Qwen3-VL-2B visual encoder Conv3D does not support bfloat16 on some cuDNN/A100
+    # combos (CUDNN_STATUS_INTERNAL_ERROR). Keep just the Conv3D in float32.
+    student.vlm.model.visual.patch_embed.proj = (
+        student.vlm.model.visual.patch_embed.proj.to(dtype=torch.float32)
+    )
     student.eval()
     return student
 
