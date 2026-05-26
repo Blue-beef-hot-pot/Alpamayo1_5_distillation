@@ -71,19 +71,21 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
     student = Alpamayo1_5_Distilled.from_pretrained_submodules(config)
     student = student.to(device=device, dtype=dtype)
     # Qwen3-VL-2B patch_embed Conv3D triggers CUDNN_STATUS_INTERNAL_ERROR
-    # when running entirely in bfloat16 on some cuDNN/A100 combos.
-    # Patch forward to cast input to float32 so cuDNN uses float32 kernels;
-    # cast output back to bfloat16 for the rest of the visual model.
-    _patch_embed = student.vlm.model.visual.patch_embed
-    def _patched_patch_embed_forward(self, hidden_states):
+    # when running in bfloat16 on some cuDNN/A100 combos.
+    # Workaround: keep Conv3D params in float32; patch forward to cast
+    # output back to bfloat16 for the rest of the visual model.
+    _proj = student.vlm.model.visual.patch_embed.proj
+    _proj.weight = torch.nn.Parameter(_proj.weight.to(dtype=torch.float32))
+    if _proj.bias is not None:
+        _proj.bias = torch.nn.Parameter(_proj.bias.to(dtype=torch.float32))
+    _pe = student.vlm.model.visual.patch_embed
+    def _fwd(self, hidden_states):
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
         )
         hidden_states = self.proj(hidden_states.to(dtype=torch.float32)).view(-1, self.embed_dim)
         return hidden_states.to(dtype=torch.bfloat16)
-    _patch_embed.forward = _patched_patch_embed_forward.__get__(
-        _patch_embed, type(_patch_embed),
-    )
+    _pe.forward = _fwd.__get__(_pe, type(_pe))
     student.eval()
     return student
 
