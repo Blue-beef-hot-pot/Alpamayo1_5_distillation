@@ -492,9 +492,6 @@ def main() -> None:
         data_cfg["clip_ids"] = [args.clip_id]
     cfg = OmegaConf.create({"data": data_cfg})
     samples = resolve_clip_samples(cfg, epoch=0)
-    print(f"  Samples: {len(samples)} (step={args.sample_step_us / 1e6:.1f}s)")
-    print("=" * 70)
-
     if len(samples) == 0:
         print("ERROR: No valid samples found for this clip.")
         sys.exit(1)
