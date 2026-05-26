@@ -66,20 +66,21 @@ def build_student(device: torch.device, dtype: torch.dtype) -> Alpamayo1_5_Disti
     student = Alpamayo1_5_Distilled.from_pretrained_submodules(config)
     student = student.to(device=device, dtype=dtype)
     # Qwen3-VL-2B patch_embed Conv3D triggers CUDNN_STATUS_INTERNAL_ERROR
-    # on some cuDNN/A100 combos. Replace Conv3D with equivalent F.linear
-    # (matrix multiply via cuBLAS), since kernel_size == stride means each
-    # spatial-temporal patch is projected independently.
+    # on some cuDNN/A100 combos, even with float32 weights. Disable cuDNN
+    # for this specific Conv3D op and run it in float32 to avoid both the
+    # cuDNN bug and the bfloat16 Conv3D fallback issue.
     _pe = student.vlm.model.visual.patch_embed
-    _proj = _pe.proj  # nn.Conv3d: (in_C, out_C, T, H, W)
-    _weight_2d = _proj.weight.reshape(_proj.weight.shape[0], -1)
-    _bias = _proj.bias
+    _proj = _pe.proj
+    _proj.weight = torch.nn.Parameter(_proj.weight.to(dtype=torch.float32))
+    if _proj.bias is not None:
+        _proj.bias = torch.nn.Parameter(_proj.bias.to(dtype=torch.float32))
     def _fwd(self, hidden_states):
-        C = self.in_channels
-        T = self.temporal_patch_size
-        H = self.patch_size
-        W = self.patch_size
-        hidden_states = hidden_states.view(-1, C * T * H * W)
-        return torch.nn.functional.linear(hidden_states, _weight_2d, _bias)
+        hidden_states = hidden_states.view(
+            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
+        )
+        with torch.backends.cudnn.flags(enabled=False):
+            hidden_states = self.proj(hidden_states.to(dtype=torch.float32)).view(-1, self.embed_dim)
+        return hidden_states.to(dtype=torch.bfloat16)
     _pe.forward = _fwd.__get__(_pe, type(_pe))
     student.eval()
     return student
