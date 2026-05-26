@@ -446,7 +446,10 @@ def pipeline_worker(local_rank: int, world_size: int, cfg: DictConfig) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        dist.destroy_process_group()
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
 
 
 @hydra.main(config_path="../configs", config_name="distill_pipeline", version_base="1.3")
