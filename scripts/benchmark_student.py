@@ -441,8 +441,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Benchmark student model inference for Orin deployment",
     )
-    parser.add_argument("--clip-id", type=str,
-                        default="030c760c-ae38-49aa-9ad8-f5650a545d26")
+    parser.add_argument("--clip-id", type=str, default=None,
+                        help="Specific clip UUID (default: auto-detect from cache)")
     parser.add_argument("--cache-dir", type=str, default="./.cache/")
     parser.add_argument("--sample-step-us", type=int, default=100_000,
                         help="Sampling interval in microseconds (default 100000 = 0.1s)")
@@ -464,21 +464,24 @@ def main() -> None:
     print(f"  Diffusion: {student.diffusion.num_inference_steps}-step Euler")
 
     # ── Resolve clip samples ──
-    cfg = OmegaConf.create({
-        "data": {
-            "cache_dir": args.cache_dir,
-            "clip_ids": [args.clip_id],
-            "sample_step_us": args.sample_step_us,
-            "history_us": 1_500_000,
-            "future_us": 6_400_000,
-            "shuffle": False,
-            "seed": 42,
-            "revision": None,
-        },
-    })
+    data_cfg: dict = {
+        "cache_dir": args.cache_dir,
+        "sample_step_us": args.sample_step_us,
+        "history_us": 1_500_000,
+        "future_us": 6_400_000,
+        "shuffle": False,
+        "seed": 42,
+        "revision": None,
+    }
+    if args.clip_id is not None:
+        data_cfg["clip_ids"] = [args.clip_id]
+    cfg = OmegaConf.create({"data": data_cfg})
     samples = resolve_clip_samples(cfg, epoch=0)
-    print(f"  Clip: {args.clip_id}")
-    print(f"  Samples: {len(samples)} (step={args.sample_step_us / 1e6:.1f}s)")
+    clip_ids = sorted({clip_id for clip_id, _ in samples})
+    print(f"  Clips: {len(clip_ids)}  Samples: {len(samples)} (step={args.sample_step_us / 1e6:.1f}s)")
+    for cid in clip_ids:
+        n = sum(1 for c, _ in samples if c == cid)
+        print(f"    {cid}: {n} samples")
     print("=" * 70)
 
     if len(samples) == 0:
