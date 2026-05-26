@@ -433,16 +433,20 @@ def pipeline_worker(local_rank: int, world_size: int, cfg: DictConfig) -> None:
         world_size=world_size,
         local_rank=local_rank,
     )
-    teacher_rank = cfg.pipeline.get("teacher_rank", 0)
-    student_ranks = infer_student_ranks(world_size, teacher_rank)
-    student_group = create_student_group(student_ranks) if rank in student_ranks else None
 
-    if rank == teacher_rank:
-        run_teacher_loop(cfg, rank, student_ranks)
-    else:
-        run_student_loop(cfg, rank, student_group, student_ranks, teacher_rank)
+    try:
+        teacher_rank = cfg.pipeline.get("teacher_rank", 0)
+        student_ranks = infer_student_ranks(world_size, teacher_rank)
+        student_group = create_student_group(student_ranks) if rank in student_ranks else None
 
-    dist.destroy_process_group()
+        if rank == teacher_rank:
+            run_teacher_loop(cfg, rank, student_ranks)
+        else:
+            run_student_loop(cfg, rank, student_group, student_ranks, teacher_rank)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        dist.destroy_process_group()
 
 
 @hydra.main(config_path="../configs", config_name="distill_pipeline", version_base="1.3")
