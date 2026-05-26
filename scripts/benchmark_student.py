@@ -471,7 +471,7 @@ def main() -> None:
         "future_us": 6_400_000,
         "shuffle": False,
         "seed": 42,
-        "revision": None,
+        "revision": "b719eea7f0a63619ef51ec7f54178af0937ef050",
     }
     if args.clip_id is not None:
         data_cfg["clip_ids"] = [args.clip_id]
