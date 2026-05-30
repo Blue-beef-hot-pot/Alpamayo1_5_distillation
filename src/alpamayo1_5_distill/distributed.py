@@ -130,6 +130,72 @@ def freeze_student_visual_tower(student: Alpamayo1_5_Distilled) -> None:
         param.requires_grad_(False)
 
 
+def freeze_module(module: torch.nn.Module) -> None:
+    """Freeze all parameters in a module."""
+    module.eval()
+    for param in module.parameters():
+        param.requires_grad_(False)
+
+
+def unfreeze_module(module: torch.nn.Module) -> None:
+    """Unfreeze all parameters in a module."""
+    module.train()
+    for param in module.parameters():
+        param.requires_grad_(True)
+
+
+def setup_stage_vlm(
+    student: Alpamayo1_5_Distilled,
+    distill_loss: DistillationLoss,
+) -> None:
+    """Stage 1: Only train VLM text decoder + VLM loss projections.
+
+    Frozen: visual encoder, Expert, action projections, Expert loss projections.
+    Trained: VLM text decoder, VLM hidden projections/margins.
+    """
+    # Freeze
+    freeze_module(student.vlm.model.visual)
+    freeze_module(student.expert)
+    freeze_module(student.action_in_proj)
+    freeze_module(student.action_out_proj)
+    freeze_module(distill_loss.expert_hidden_projs)
+    freeze_module(distill_loss.expert_margins)
+    # Train
+    unfreeze_module(student.vlm.model.language_model)
+    unfreeze_module(student.vlm.lm_head)
+    unfreeze_module(distill_loss.vlm_hidden_projs)
+    unfreeze_module(distill_loss.vlm_margins)
+
+    trainable = sum(p.numel() for p in student.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in student.parameters())
+    logger.info("Stage VLM: trainable %d / %d params", trainable, total)
+
+
+def setup_stage_expert(
+    student: Alpamayo1_5_Distilled,
+    distill_loss: DistillationLoss,
+) -> None:
+    """Stage 2: Only train Expert + action projections + Expert loss projections.
+
+    Frozen: VLM (entire), VLM loss projections.
+    Trained: Expert, action_in_proj, action_out_proj, Expert hidden projections/margins.
+    """
+    # Freeze
+    freeze_module(student.vlm)
+    freeze_module(distill_loss.vlm_hidden_projs)
+    freeze_module(distill_loss.vlm_margins)
+    # Train
+    unfreeze_module(student.expert)
+    unfreeze_module(student.action_in_proj)
+    unfreeze_module(student.action_out_proj)
+    unfreeze_module(distill_loss.expert_hidden_projs)
+    unfreeze_module(distill_loss.expert_margins)
+
+    trainable = sum(p.numel() for p in student.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in student.parameters())
+    logger.info("Stage Expert: trainable %d / %d params", trainable, total)
+
+
 def wrap_student_ddp(
     student: Alpamayo1_5_Distilled,
     distill_loss: DistillationLoss,
