@@ -55,6 +55,34 @@ from alpamayo1_5_distill.distributed import (
 logger = logging.getLogger(__name__)
 
 
+def patch_conv3d_for_a100(model) -> None:
+    """Patch Qwen3-VL patch_embed Conv3D to avoid cuDNN CUDNN_STATUS_INTERNAL_ERROR.
+
+    On some cuDNN/A100 combos, Conv3D in bfloat16 triggers cuDNN internal error.
+    Since kernel_size == stride in patch_embed, each patch is projected independently,
+    so Conv3D is equivalent to F.linear (matrix multiply via cuBLAS).
+    """
+    if not hasattr(model, 'vlm') or not hasattr(model.vlm, 'model'):
+        return
+    if not hasattr(model.vlm.model, 'visual'):
+        return
+
+    _pe = model.vlm.model.visual.patch_embed
+    _proj = _pe.proj  # nn.Conv3d
+    _weight_2d = _proj.weight.reshape(_proj.weight.shape[0], -1)
+    _bias = _proj.bias
+
+    def _fwd(self, hidden_states):
+        C = self.in_channels
+        T = self.temporal_patch_size
+        H = self.patch_size
+        W = self.patch_size
+        hidden_states = hidden_states.view(-1, C * T * H * W)
+        return torch.nn.functional.linear(hidden_states, _weight_2d, _bias)
+
+    _pe.forward = _fwd.__get__(_pe, type(_pe))
+
+
 def save_stage_progress(output_dir: Path, stage_name: str, epoch: int, global_step: int) -> None:
     """Save stage progress for resume support."""
     progress = {
@@ -304,6 +332,7 @@ def main(cfg: DictConfig) -> None:
         device=device,
         dtype=getattr(torch, cfg.teacher.dtype),
     )
+    patch_conv3d_for_a100(teacher)
     if rank == 0:
         logger.info("Teacher loaded: %s", cfg.teacher.model_name)
 
@@ -316,6 +345,7 @@ def main(cfg: DictConfig) -> None:
     else:
         student_config = build_student_config(cfg)
         student = Alpamayo1_5_Distilled(student_config).to(device)
+    patch_conv3d_for_a100(student)
 
     total_params = sum(p.numel() for p in student.parameters())
     if rank == 0:
