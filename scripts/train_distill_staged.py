@@ -59,8 +59,7 @@ def patch_conv3d_for_a100(model) -> None:
     """Patch Qwen3-VL patch_embed Conv3D to avoid cuDNN CUDNN_STATUS_INTERNAL_ERROR.
 
     On some cuDNN/A100 combos, Conv3D in bfloat16 triggers cuDNN internal error.
-    Since kernel_size == stride in patch_embed, each patch is projected independently,
-    so Conv3D is equivalent to F.linear (matrix multiply via cuBLAS).
+    Fix: keep Conv3D weights in float32 and disable cuDNN for this specific op.
     """
     if not hasattr(model, 'vlm') or not hasattr(model.vlm, 'model'):
         return
@@ -69,16 +68,18 @@ def patch_conv3d_for_a100(model) -> None:
 
     _pe = model.vlm.model.visual.patch_embed
     _proj = _pe.proj  # nn.Conv3d
-    _weight_2d = _proj.weight.reshape(_proj.weight.shape[0], -1)
-    _bias = _proj.bias
+    # Keep Conv3D weights in float32 to avoid cuDNN bfloat16 issues
+    _proj.weight = torch.nn.Parameter(_proj.weight.to(dtype=torch.float32))
+    if _proj.bias is not None:
+        _proj.bias = torch.nn.Parameter(_proj.bias.to(dtype=torch.float32))
 
     def _fwd(self, hidden_states):
-        C = self.in_channels
-        T = self.temporal_patch_size
-        H = self.patch_size
-        W = self.patch_size
-        hidden_states = hidden_states.view(-1, C * T * H * W)
-        return torch.nn.functional.linear(hidden_states, _weight_2d, _bias)
+        hidden_states = hidden_states.view(
+            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
+        )
+        with torch.backends.cudnn.flags(enabled=False):
+            hidden_states = self.proj(hidden_states.to(dtype=torch.float32)).view(-1, self.embed_dim)
+        return hidden_states.to(dtype=torch.bfloat16)
 
     _pe.forward = _fwd.__get__(_pe, type(_pe))
 
