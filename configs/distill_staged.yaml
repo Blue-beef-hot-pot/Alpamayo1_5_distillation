@@ -64,6 +64,14 @@ training:
   resume_from_checkpoint: null
   auto_next_stage: true
 
+# Top-level loss config (used by build_student_config, updated per stage)
+loss:
+  vlm_logits_weight: 1.0
+  expert_hidden_weight: 0.0
+  vlm_hidden_weight: 0.5
+  trajectory_l2_weight: 0.0
+  temperature: 2.0
+
 data:
   dataset: "nvidia/PhysicalAI-Autonomous-Vehicles"
   cache_dir: null
