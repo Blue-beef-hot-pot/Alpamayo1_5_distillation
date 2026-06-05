@@ -25,12 +25,12 @@ stages:
     loss:
       vlm_logits_weight: 1.0
       expert_hidden_weight: 0.0
-      vlm_hidden_weight: 0.5
+      vlm_hidden_weight: 0.1
       trajectory_l2_weight: 0.0
       temperature: 2.0
     optimizer:
       _target_: torch.optim.AdamW
-      lr: 1.0e-4
+      lr: 1.0e-5
       weight_decay: 0.01
     scheduler:
       _target_: torch.optim.lr_scheduler.CosineAnnealingLR
@@ -47,7 +47,7 @@ stages:
       temperature: 2.0
     optimizer:
       _target_: torch.optim.AdamW
-      lr: 5.0e-5
+      lr: 1.0e-5
       weight_decay: 0.01
     scheduler:
       _target_: torch.optim.lr_scheduler.CosineAnnealingLR
@@ -56,7 +56,7 @@ stages:
 
 training:
   batch_size: 1
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 1
   mixed_precision: bfloat16
   max_grad_norm: 1.0
   save_every_n_epochs: 2
@@ -68,7 +68,7 @@ training:
 loss:
   vlm_logits_weight: 1.0
   expert_hidden_weight: 0.0
-  vlm_hidden_weight: 0.5
+  vlm_hidden_weight: 0.1
   trajectory_l2_weight: 0.0
   temperature: 2.0
 
