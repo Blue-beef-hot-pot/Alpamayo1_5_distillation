@@ -40,14 +40,19 @@ def vlm_logits_kd_loss(
     """KL divergence loss between student and teacher VLM logits.
 
     Args:
-        student_logits: Student VLM logits [B, L, V].
-        teacher_logits: Teacher VLM logits [B, L, V].
+        student_logits: Student VLM logits [B, L, V_s].
+        teacher_logits: Teacher VLM logits [B, L, V_t].
         temperature: Softmax temperature (higher = softer distributions).
         mask: Optional mask [B, L] where 1 = valid, 0 = padding.
 
     Returns:
         Scalar KL divergence loss.
     """
+    # Align vocab dimensions - truncate to common size
+    min_vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
+    student_logits = student_logits[..., :min_vocab]
+    teacher_logits = teacher_logits[..., :min_vocab]
+
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
     teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
     kl = F.kl_div(student_log_probs, teacher_probs, reduction="none").sum(dim=-1)  # [B, L]
@@ -275,13 +280,10 @@ class DistillationLoss(nn.Module):
             and student_vlm_logits is not None
             and teacher_vlm_logits is not None
         ):
-            if student_vlm_logits.shape[-1] != teacher_vlm_logits.shape[-1]:
-                losses["vlm_logits_kd"] = torch.zeros((), device=device)
-            else:
-                losses["vlm_logits_kd"] = vlm_logits_kd_loss(
-                    student_vlm_logits, teacher_vlm_logits,
-                    temperature=self.temperature, mask=vlm_mask,
-                )
+            losses["vlm_logits_kd"] = vlm_logits_kd_loss(
+                student_vlm_logits, teacher_vlm_logits,
+                temperature=self.temperature, mask=vlm_mask,
+            )
         else:
             losses["vlm_logits_kd"] = torch.zeros((), device=device)
 
