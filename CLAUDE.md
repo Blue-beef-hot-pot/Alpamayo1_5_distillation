@@ -120,9 +120,11 @@ pytest
 
 ## Data Loading
 
-`build_dataloader(cfg, epoch=...)` supports two modes:
+`build_dataloader(cfg, epoch=..., rank=0, world_size=1)` supports two modes:
 - `data.cache_dir: null` — stream from HuggingFace Hub with `maybe_stream=True` and the legacy single-clip fallback when `clip_ids` is null.
 - `data.cache_dir: ./path` — read only from local HF cache with `maybe_stream=False`; when `clip_ids` is null it auto-detects all downloaded chunks and uses all cached clips.
+
+**DDP Data Splitting**: In distributed training (`world_size > 1`), each rank processes a different subset of samples using stride-based splitting (`samples[rank::world_size]`). This ensures data diversity across GPUs and avoids redundant computation. Without this, all GPUs would process identical samples, effectively reducing batch diversity.
 
 Training samples are `(clip_id, t0_us)` pairs. Each clip is sampled every `data.sample_step_us` microseconds (default 1s) inside the common valid timestamp range of egomotion and the four required training cameras, aligned to the 0.1s data grid, leaving `data.history_us` (1.5s) before `t0_us`, `data.future_us` (6.4s) after it, and enough camera history for the 4-frame image window ending at `t0_us`. Shuffle uses `data.seed + epoch` and applies at sample level.
 

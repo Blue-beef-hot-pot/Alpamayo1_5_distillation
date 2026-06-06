@@ -277,11 +277,21 @@ def load_clip_sample(
     )
 
 
-def build_dataloader(cfg: DictConfig, epoch: int = 0):
-    """Yield clip data dicts for training, loading from local cache when available."""
+def build_dataloader(cfg: DictConfig, epoch: int = 0, rank: int = 0, world_size: int = 1):
+    """Yield clip data dicts for training, loading from local cache when available.
+
+    In DDP mode, each rank processes a different subset of samples (stride by world_size)
+    to ensure data diversity across GPUs and avoid redundant computation.
+    """
     cache_dir = cfg.data.get("cache_dir")
     avdi = _build_avdi(cache_dir, cfg.data.get("revision"))
-    for clip_id, t0_us in resolve_clip_samples(cfg, epoch=epoch, avdi=avdi):
+    samples = resolve_clip_samples(cfg, epoch=epoch, avdi=avdi)
+
+    # Split samples across DDP ranks
+    if world_size > 1:
+        samples = samples[rank::world_size]
+
+    for clip_id, t0_us in samples:
         yield load_clip_sample(cfg, avdi, clip_id, t0_us)
 
 

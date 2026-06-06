@@ -25,6 +25,7 @@ Usage:
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 import hydra
@@ -33,7 +34,9 @@ import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from gpu_monitor import GPUMonitor
 from alpamayo1_5 import helper
 from alpamayo1_5_distill.checkpoint import load_training_state, save_training_checkpoint
 from alpamayo1_5_distill.distill_loss import DistillationLoss
@@ -51,40 +54,17 @@ from alpamayo1_5_distill.distributed import (
     setup_stage_vlm,
     setup_stage_expert,
 )
+from alpamayo1_5.models.token_utils import to_special_token
 
 logger = logging.getLogger(__name__)
 
 
-def patch_conv3d_for_a100(model) -> None:
-    """Patch Qwen3-VL patch_embed Conv3D to avoid cuDNN CUDNN_STATUS_INTERNAL_ERROR.
+class DummyCtx:
+    """Dummy context manager for when monitor is not available."""
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
 
-    On some cuDNN/A100 combos, Conv3D in bfloat16 triggers cuDNN internal error.
-    Since kernel_size == stride in patch_embed, each patch is projected independently,
-    so Conv3D is equivalent to F.linear (matrix multiply via cuBLAS).
-    """
-    if not hasattr(model, 'vlm') or not hasattr(model.vlm, 'model'):
-        return
-    if not hasattr(model.vlm.model, 'visual'):
-        return
 
-    _pe = model.vlm.model.visual.patch_embed
-    _proj = _pe.proj  # nn.Conv3d
-
-    def _fwd(self, hidden_states):
-        C = self.in_channels
-        T = self.temporal_patch_size
-        H = self.patch_size
-        W = self.patch_size
-        hidden_states = hidden_states.view(-1, C * T * H * W)
-        # Use F.linear to avoid Conv3D cuDNN issues
-        return torch.nn.functional.linear(
-            hidden_states,
-            self.proj.weight.reshape(self.proj.weight.shape[0], -1),
-            self.proj.bias,
-        )
-
-    _pe.forward = _fwd.__get__(_pe, type(_pe))
-    logger.info("Patched Conv3D -> F.linear")
 
 
 def save_stage_progress(output_dir: Path, stage_name: str, epoch: int, global_step: int) -> None:
@@ -114,12 +94,16 @@ def train_stage(
     student: Alpamayo1_5_Distilled,
     teacher: Alpamayo1_5_Distilled,
     distill_loss: DistillationLoss,
-    processor,
+    teacher_processor,
+    student_processor,
     device: str,
     output_dir: Path,
     rank: int,
+    world_size: int = 1,
     start_epoch: int = 0,
     global_step: int = 0,
+    max_batches: int | None = None,
+    monitor: GPUMonitor | None = None,
 ) -> tuple[int, int]:
     """Train one stage.
 
@@ -130,7 +114,8 @@ def train_stage(
         student: Student model
         teacher: Teacher model
         distill_loss: Distillation loss module
-        processor: Tokenizer/processor
+        teacher_processor: Tokenizer/processor for teacher model
+        student_processor: Tokenizer/processor for student model
         device: CUDA device
         output_dir: Output directory
         rank: Distributed rank
@@ -193,26 +178,51 @@ def train_stage(
         epoch_loss = 0.0
         num_batches = 0
 
-        for batch_idx, data in enumerate(build_dataloader(cfg, epoch=epoch)):
-            model_inputs = prepare_model_inputs(data, processor, device)
+        for batch_idx, data in enumerate(build_dataloader(cfg, epoch=epoch, rank=rank, world_size=world_size)):
+            # Data loading
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t0 = time.perf_counter()
+            model_inputs = prepare_model_inputs(data, teacher_processor, device)
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t_data = time.perf_counter() - t0
 
-            # Teacher forward (no grad)
+            # Fuse trajectory tokens
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t0 = time.perf_counter()
+            input_ids = model_inputs["tokenized_data"]["input_ids"]
+            traj_data = {
+                "ego_history_xyz": model_inputs["ego_history_xyz"],
+                "ego_history_rot": model_inputs["ego_history_rot"],
+            }
+            fused_ids = teacher.fuse_traj_tokens(input_ids, traj_data)
+            model_inputs["tokenized_data"]["input_ids"] = fused_ids
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t_fuse = time.perf_counter() - t0
+
+            # Teacher forward
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t0 = time.perf_counter()
             with torch.no_grad():
-                teacher_out = teacher_forward(
-                    teacher,
-                    model_inputs,
-                    top_p=cfg.teacher.top_p,
-                    temperature=cfg.teacher.temperature,
-                    num_traj_samples=cfg.teacher.num_traj_samples,
-                    max_generation_length=cfg.teacher.max_generation_length,
-                    collect_expert_hiddens=collect_expert_hiddens,
-                    collect_vlm_hiddens=collect_vlm_hiddens,
-                )
+                with torch.autocast("cuda", dtype=getattr(torch, cfg.teacher.dtype)):
+                    teacher_out = teacher_forward(
+                        teacher,
+                        model_inputs,
+                        top_p=cfg.teacher.top_p,
+                        temperature=cfg.teacher.temperature,
+                        num_traj_samples=cfg.teacher.num_traj_samples,
+                        max_generation_length=cfg.teacher.max_generation_length,
+                        collect_expert_hiddens=collect_expert_hiddens,
+                        collect_vlm_hiddens=collect_vlm_hiddens,
+                        skip_fuse_traj_tokens=True,  # Already fused in data loading
+                    )
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t_teacher = time.perf_counter() - t0
 
             del data
-            torch.cuda.empty_cache()
 
             # Student forward with teacher-forcing
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t0 = time.perf_counter()
             with torch.autocast("cuda", dtype=getattr(torch, cfg.training.mixed_precision)):
                 student_out = student_forward(
                     student,
@@ -235,10 +245,26 @@ def train_stage(
                     student_traj=student_out.sampled_traj,
                     teacher_traj=teacher_out.sampled_traj,
                 )
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t_student = time.perf_counter() - t0
 
             loss = losses["total"]
             loss_scaled = loss / cfg.training.gradient_accumulation_steps
+
+            # Backward pass
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t0 = time.perf_counter()
             loss_scaled.backward()
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            t_backward = time.perf_counter() - t0
+
+            # Log timing
+            if rank == 0:
+                total_batch_time = t_data + t_fuse + t_teacher + t_student + t_backward
+                logger.info(
+                    "Batch %d | Data: %.3fs | Fuse: %.3fs | Teacher: %.3fs | Student: %.3fs | Backward: %.3fs | Total: %.3fs",
+                    batch_idx, t_data, t_fuse, t_teacher, t_student, t_backward, total_batch_time
+                )
 
             if (global_step + 1) % cfg.training.gradient_accumulation_steps == 0:
                 if cfg.training.max_grad_norm:
@@ -257,6 +283,12 @@ def train_stage(
                     "Stage %s | Epoch %d | Batch %d | Step %d — %s",
                     stage_name, epoch, batch_idx, global_step, loss_str,
                 )
+
+            # Early stop for testing
+            if max_batches is not None and (batch_idx + 1) >= max_batches:
+                if rank == 0:
+                    logger.info("Reached max_batches=%d, stopping early", max_batches)
+                break
 
         avg_loss = epoch_loss / max(num_batches, 1)
         if rank == 0:
@@ -330,17 +362,29 @@ def main(cfg: DictConfig) -> None:
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Timing dictionary
+    timings = {}
+
     # 1) Load teacher (each GPU has its own copy)
+    if rank == 0:
+        logger.info("Loading teacher model...")
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    t0 = time.perf_counter()
     teacher = load_teacher(
         model_name=cfg.teacher.model_name,
         device=device,
         dtype=getattr(torch, cfg.teacher.dtype),
     )
-    patch_conv3d_for_a100(teacher)
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    timings["teacher_load"] = time.perf_counter() - t0
     if rank == 0:
-        logger.info("Teacher loaded: %s", cfg.teacher.model_name)
+        logger.info("Teacher loaded: %s (%.1fs)", cfg.teacher.model_name, timings["teacher_load"])
 
-    # 2) Build student
+    # 2) Build student (use pretrained VLM weights)
+    if rank == 0:
+        logger.info("Loading student model...")
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    t0 = time.perf_counter()
     resume_path = cfg.training.get("resume_from_checkpoint")
     if resume_path:
         student = Alpamayo1_5_Distilled.from_pretrained(resume_path).to(device)
@@ -348,14 +392,17 @@ def main(cfg: DictConfig) -> None:
             logger.info("Student loaded from checkpoint: %s", resume_path)
     else:
         student_config = build_student_config(cfg)
-        student = Alpamayo1_5_Distilled(student_config).to(device)
-    patch_conv3d_for_a100(student)
+        student = Alpamayo1_5_Distilled.from_pretrained_submodules(student_config).to(device)
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    timings["student_load"] = time.perf_counter() - t0
 
     total_params = sum(p.numel() for p in student.parameters())
     if rank == 0:
-        logger.info("Student created: %s total params", f"{total_params:,}")
+        logger.info("Student created: %s total params (%.1fs)", f"{total_params:,}", timings["student_load"])
 
-    processor = helper.get_processor(student.tokenizer)
+    # Use teacher's tokenizer for teacher forward, student's for student forward
+    teacher_processor = helper.get_processor(teacher.tokenizer)
+    student_processor = helper.get_processor(student.tokenizer)
 
     # 3) Build loss
     teacher_hidden_dim = cfg.teacher.get("hidden_dim", 4096)
@@ -389,6 +436,19 @@ def main(cfg: DictConfig) -> None:
                 return
 
     # 5) Run stages
+    max_batches = cfg.training.get("max_batches", None)
+    if max_batches is not None:
+        max_batches = int(max_batches)
+        if rank == 0:
+            logger.info("Max batches per epoch: %d", max_batches)
+
+    # Start GPU monitor
+    gpu_id = int(device.split(":")[-1]) if ":" in device else 0
+    monitor = GPUMonitor(gpu_id=gpu_id, interval=0.2)
+    if rank == 0:
+        monitor.start()
+        logger.info("GPU monitor started (gpu_id=%d)", gpu_id)
+
     for idx in range(start_stage_idx, len(stages_to_run)):
         stage_name = stages_to_run[idx]
         stage_cfg = cfg.stages[stage_name]
@@ -405,12 +465,16 @@ def main(cfg: DictConfig) -> None:
             student=student,
             teacher=teacher,
             distill_loss=distill_loss,
-            processor=processor,
+            teacher_processor=teacher_processor,
+            student_processor=student_processor,
             device=device,
             output_dir=output_dir,
             rank=rank,
+            world_size=world_size,
             start_epoch=start_epoch if idx == start_stage_idx else 0,
             global_step=global_step if idx == start_stage_idx else 0,
+            max_batches=max_batches,
+            monitor=monitor if rank == 0 else None,
         )
 
         # Reset for next stage
@@ -421,6 +485,17 @@ def main(cfg: DictConfig) -> None:
                 logger.info("Stage %s complete. Set training.resume_from_checkpoint=%s to continue",
                             stage_name, output_dir / f"stage_{stage_name}_final")
             break
+
+    # Stop GPU monitor and save report
+    if rank == 0:
+        monitor.stop()
+        report_path = output_dir / "gpu_report.txt"
+        csv_path = output_dir / "gpu_timeline.csv"
+        monitor.save_report(str(report_path))
+        monitor.save_csv(str(csv_path))
+        monitor.print_summary()
+        logger.info("GPU report saved to: %s", report_path)
+        logger.info("GPU timeline saved to: %s", csv_path)
 
     if rank == 0:
         logger.info("Training complete!")
