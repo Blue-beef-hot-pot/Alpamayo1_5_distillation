@@ -91,26 +91,35 @@ def _align_teacher_sequences_to_student(
     sequences: torch.Tensor, student: Any, teacher: Alpamayo1_5 | None = None
 ) -> torch.Tensor:
     max_student_token_id = _get_student_vocab_limit(student)
-    if sequences.numel() == 0 or int(sequences.max().item()) <= max_student_token_id:
+    if sequences.numel() == 0:
         return sequences
-    if teacher is None:
-        raise ValueError(
-            f"teacher_sequences contains token id {int(sequences.max().item())}, but student "
-            f"embedding only supports ids <= {max_student_token_id}"
-        )
 
     aligned = sequences.clone()
     student_tokenizer = _get_student_tokenizer(student)
-    overflow_ids = torch.unique(sequences[sequences > max_student_token_id]).tolist()
-    for token_id in overflow_ids:
-        token = teacher.tokenizer.convert_ids_to_tokens(int(token_id))
-        student_token_id = student_tokenizer.convert_tokens_to_ids(token)
-        if student_token_id is None or student_token_id > max_student_token_id:
-            raise ValueError(
-                f"teacher token {token!r} id {int(token_id)} cannot be mapped into the "
-                f"student vocabulary"
-            )
-        aligned[sequences == int(token_id)] = int(student_token_id)
+
+    if teacher is not None:
+        # Map overflow tokens (outside student vocab)
+        overflow_ids = torch.unique(sequences[sequences > max_student_token_id]).tolist()
+        for token_id in overflow_ids:
+            token = teacher.tokenizer.convert_ids_to_tokens(int(token_id))
+            student_token_id = student_tokenizer.convert_tokens_to_ids(token)
+            if student_token_id is None or student_token_id > max_student_token_id:
+                raise ValueError(
+                    f"teacher token {token!r} id {int(token_id)} cannot be mapped into the "
+                    f"student vocabulary"
+                )
+            aligned[sequences == int(token_id)] = int(student_token_id)
+
+        # Also map special tokens that may have different IDs
+        # This handles cases where teacher and student have different vocab sizes
+        from alpamayo1_5.models.base_model import SPECIAL_TOKENS, TRAJ_TOKEN
+        all_special = {**SPECIAL_TOKENS, **TRAJ_TOKEN}
+        for name, token_str in all_special.items():
+            teacher_id = teacher.tokenizer.convert_tokens_to_ids(token_str)
+            student_id = student_tokenizer.convert_tokens_to_ids(token_str)
+            if teacher_id is not None and student_id is not None and teacher_id != student_id:
+                aligned[sequences == int(teacher_id)] = int(student_id)
+
     return aligned
 
 

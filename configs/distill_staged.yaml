@@ -25,7 +25,7 @@ stages:
     loss:
       vlm_logits_weight: 1.0
       expert_hidden_weight: 0.0
-      vlm_hidden_weight: 0.1
+      vlm_hidden_weight: 0.001  # 作为正则化，权重很小
       trajectory_l2_weight: 0.0
       temperature: 2.0
     optimizer:

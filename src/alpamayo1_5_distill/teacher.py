@@ -145,6 +145,7 @@ def teacher_forward(
     max_generation_length: int = 256,
     collect_expert_hiddens: bool = True,
     collect_vlm_hiddens: bool = True,
+    skip_fuse_traj_tokens: bool = False,
 ) -> TeacherOutput:
     """Run teacher forward pass and extract soft labels for distillation.
 
@@ -184,11 +185,12 @@ def teacher_forward(
     tokenized_data = data["tokenized_data"]
     input_ids = tokenized_data.pop("input_ids")
 
-    traj_data_vlm = {
-        "ego_history_xyz": ego_history_xyz,
-        "ego_history_rot": ego_history_rot,
-    }
-    input_ids = teacher.fuse_traj_tokens(input_ids, traj_data_vlm)
+    if not skip_fuse_traj_tokens:
+        traj_data_vlm = {
+            "ego_history_xyz": ego_history_xyz,
+            "ego_history_rot": ego_history_rot,
+        }
+        input_ids = teacher.fuse_traj_tokens(input_ids, traj_data_vlm)
     device = input_ids.device
 
     # 1) VLM autoregressive generation
@@ -253,7 +255,6 @@ def teacher_forward(
         # Exclude embedding layer output (index 0)
         teacher_vlm_hiddens = list(vlm_fwd_out.hidden_states[1:])
         del vlm_fwd_out
-        torch.cuda.empty_cache()
 
     prompt_cache = vlm_outputs.past_key_values
     prefill_seq_len = prompt_cache.get_seq_length()
