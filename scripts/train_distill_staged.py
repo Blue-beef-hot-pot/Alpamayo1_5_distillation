@@ -40,6 +40,7 @@ from gpu_monitor import GPUMonitor
 from alpamayo1_5 import helper
 from alpamayo1_5_distill.checkpoint import load_training_state, save_training_checkpoint
 from alpamayo1_5_distill.distill_loss import DistillationLoss
+from alpamayo1_5_distill.memory_monitor import GPUMemoryMonitor
 from alpamayo1_5_distill.model import Alpamayo1_5_Distilled
 from alpamayo1_5_distill.student_forward import student_forward
 from alpamayo1_5_distill.teacher import load_teacher, teacher_forward
@@ -104,6 +105,7 @@ def train_stage(
     global_step: int = 0,
     max_batches: int | None = None,
     monitor: GPUMonitor | None = None,
+    memory_monitor: GPUMemoryMonitor | None = None,
 ) -> tuple[int, int]:
     """Train one stage.
 
@@ -250,6 +252,12 @@ def train_stage(
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             t_student = time.perf_counter() - t0
 
+            # Free teacher outputs after loss computation
+            teacher_sequences = teacher_out.sequences  # Keep for student teacher-forcing
+            del teacher_out
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             loss = losses["total"]
             loss_scaled = loss / cfg.training.gradient_accumulation_steps
 
@@ -278,6 +286,10 @@ def train_stage(
             epoch_loss += loss.item()
             num_batches += 1
             global_step += 1
+
+            # Check memory periodically
+            if memory_monitor is not None:
+                memory_monitor.check_and_cleanup(global_step)
 
             if rank == 0 and batch_idx % 10 == 0:
                 loss_str = " | ".join(f"{k}: {v.item():.4f}" for k, v in losses.items())
@@ -311,6 +323,8 @@ def train_stage(
                 )
                 save_stage_progress(output_dir, stage_name, epoch, global_step)
                 logger.info("Checkpoint saved: %s", ckpt_dir)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             if avg_loss < best_loss:
                 best_loss = avg_loss
@@ -324,6 +338,8 @@ def train_stage(
                     global_step=global_step,
                     best_loss=best_loss,
                 )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     # Save final stage checkpoint
     if rank == 0:
@@ -451,6 +467,9 @@ def main(cfg: DictConfig) -> None:
         monitor.start()
         logger.info("GPU monitor started (gpu_id=%d)", gpu_id)
 
+    # Create memory monitor
+    memory_monitor = GPUMemoryMonitor(device=device)
+
     for idx in range(start_stage_idx, len(stages_to_run)):
         stage_name = stages_to_run[idx]
         stage_cfg = cfg.stages[stage_name]
@@ -477,10 +496,15 @@ def main(cfg: DictConfig) -> None:
             global_step=global_step if idx == start_stage_idx else 0,
             max_batches=max_batches,
             monitor=monitor if rank == 0 else None,
+            memory_monitor=memory_monitor,
         )
 
         # Reset for next stage
         start_epoch = 0
+
+        # Clear cache between stages
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         if not cfg.training.get("auto_next_stage", True) and idx < len(stages_to_run) - 1:
             if rank == 0:
