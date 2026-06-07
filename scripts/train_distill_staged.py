@@ -151,14 +151,16 @@ def train_stage(
 
     # Build scheduler
     num_samples = len(resolve_clip_samples(cfg, epoch=0))
-    total_steps = (num_samples * stage_cfg.num_epochs) // cfg.training.gradient_accumulation_steps
+    # In DDP, each rank processes a subset of samples
+    per_rank_samples = num_samples // world_size if world_size > 1 else num_samples
+    total_steps = (per_rank_samples * stage_cfg.num_epochs) // cfg.training.gradient_accumulation_steps
     scheduler_cfg = OmegaConf.to_container(stage_cfg.scheduler, resolve=True)
     scheduler_cfg["T_max"] = total_steps
     scheduler = hydra.utils.instantiate(scheduler_cfg, optimizer=optimizer)
 
     logger.info(
-        "Stage %s: %d epochs, %d samples/epoch, %d optimizer steps, lr=%.2e",
-        stage_name, stage_cfg.num_epochs, num_samples, total_steps,
+        "Stage %s: %d epochs, %d samples/epoch (per rank: %d), %d optimizer steps, lr=%.2e",
+        stage_name, stage_cfg.num_epochs, num_samples, per_rank_samples, total_steps,
         stage_cfg.optimizer.lr,
     )
 

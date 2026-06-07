@@ -337,10 +337,25 @@ class DistillationLoss(nn.Module):
         else:
             losses["trajectory_l2"] = torch.zeros((), device=device)
 
+        # Dynamic weight adjustment for VLM Hidden KD
+        # Goal: make hidden loss contribute proportionally to logit loss
+        # This prevents hidden loss from dominating training
+        vlm_hidden_weight = self.vlm_hidden_weight
+        if (
+            self.vlm_hidden_weight > 0
+            and losses["vlm_logits_kd"].item() > 0
+            and losses["vlm_hidden_kd"].item() > 0
+        ):
+            logit_loss_val = losses["vlm_logits_kd"].detach()
+            hidden_loss_val = losses["vlm_hidden_kd"].detach()
+            # Scale weight so that hidden contribution ≈ logit contribution
+            vlm_hidden_weight = self.vlm_hidden_weight * (logit_loss_val / (hidden_loss_val + 1e-8))
+            losses["vlm_hidden_weight_dynamic"] = vlm_hidden_weight
+
         losses["total"] = (
             self.vlm_logits_weight * losses["vlm_logits_kd"]
             + self.expert_hidden_weight * losses["expert_hidden_kd"]
-            + self.vlm_hidden_weight * losses["vlm_hidden_kd"]
+            + vlm_hidden_weight * losses["vlm_hidden_kd"]
             + self.trajectory_l2_weight * losses["trajectory_l2"]
         )
 
